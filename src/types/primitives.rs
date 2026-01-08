@@ -3,8 +3,17 @@ use std::fmt;
 /// Monotonically increasing term number.
 ///
 /// Terms act as logical clocks in Raft and are used to detect stale information.
+#[derive(Clone, Copy, Default)]
 pub struct Term {
     value: u64,
+}
+
+impl Term {
+    pub fn increment(self) -> Term {
+        Term {
+            value: self.value.saturating_add(1),
+        }
+    }
 }
 
 impl fmt::Display for Term {
@@ -23,8 +32,16 @@ impl From<u64> for Term {
 ///
 /// LogIndex 0 represents "no entries" or "before the first entry".
 /// Valid log entries start at index 1.
+#[derive(Clone, Copy, Default)]
 pub struct LogIndex {
     value: u64,
+}
+
+impl LogIndex {
+    /// Create from array length (0-based length becomes 1-based index).
+    pub fn from_length(len: usize) -> LogIndex {
+        LogIndex { value: len as u64 }
+    }
 }
 
 impl fmt::Display for LogIndex {
@@ -40,6 +57,7 @@ impl From<u64> for LogIndex {
 }
 
 /// Unique server identifier.
+#[derive(Clone, Copy)]
 pub struct NodeId {
     value: u64,
 }

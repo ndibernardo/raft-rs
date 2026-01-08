@@ -2,6 +2,7 @@ use super::log::LogEntry;
 use super::primitives::{LogIndex, NodeId, Term};
 
 /// RequestVote RPC arguments.
+#[derive(Clone)]
 pub struct RequestVote {
     pub term: Term,
     pub candidate_id: NodeId,
