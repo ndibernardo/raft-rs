@@ -48,6 +48,15 @@ impl LogIndex {
             value: self.value.saturating_add(1),
         }
     }
+
+    /// Convert to array index (0-based). Returns None for index 0.
+    pub fn to_array_index(self) -> Option<usize> {
+        if self.value == 0 {
+            None
+        } else {
+            Some((self.value - 1) as usize)
+        }
+    }
 }
 
 impl fmt::Display for LogIndex {
