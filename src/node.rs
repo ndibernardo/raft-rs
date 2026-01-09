@@ -151,4 +151,64 @@ impl<C> Node<C> {
             std::cmp::Ordering::Equal => candidate_index >= my_index,
         }
     }
+
+    /// Handle incoming RequestVoteResponse RPC.
+    pub fn handle_request_vote_response(
+        &mut self,
+        from: NodeId,
+        resp: RequestVoteResponse,
+    ) -> Vec<Command<C>> {
+        // Ignore stale responses.
+        if resp.term < self.persistent.current_term {
+            return Vec::new();
+        }
+
+        // If response contains higher term, step down.
+        if resp.term > self.persistent.current_term {
+            self.persistent.current_term = resp.term;
+            self.persistent.voted_for = None;
+            self.role = Role::Follower(Follower { leader_id: None });
+            return Vec::new();
+        }
+
+        // Only candidates process vote responses.
+        let Role::Candidate(ref mut candidate) = self.role else {
+            return Vec::new();
+        };
+
+        if resp.vote_granted {
+            candidate.votes_received.push(from);
+        }
+
+        // Check for majority.
+        let cluster_size = self.peers.len() + 1;
+        let votes = candidate.votes_received.len();
+        let majority = cluster_size / 2 + 1;
+
+        if votes >= majority {
+            self.become_leader()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn become_leader(&mut self) -> Vec<Command<C>> {
+        let last_log_index = self.last_log_index();
+
+        self.role = Role::Leader(Leader {
+            next_index: self
+                .peers
+                .iter()
+                .map(|&peer| (peer, last_log_index.next()))
+                .collect(),
+            match_index: self
+                .peers
+                .iter()
+                .map(|&peer| (peer, LogIndex::default()))
+                .collect(),
+        });
+
+        // Leader sends initial empty AppendEntries (heartbeats) to establish authority.
+        Vec::new()
+    }
 }

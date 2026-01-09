@@ -1,4 +1,4 @@
-use crate::types::NodeId;
+use crate::types::{LogIndex, NodeId};
 
 /// Follower state - passive, responds to RPCs.
 pub struct Follower {
@@ -12,6 +12,6 @@ pub struct Candidate {
 
 /// Leader state - manages replication.
 pub struct Leader {
-    pub next_index: Vec<(NodeId, u64)>,
-    pub match_index: Vec<(NodeId, u64)>,
+    pub next_index: Vec<(NodeId, LogIndex)>,
+    pub match_index: Vec<(NodeId, LogIndex)>,
 }

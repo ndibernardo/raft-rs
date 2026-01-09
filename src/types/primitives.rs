@@ -42,6 +42,12 @@ impl LogIndex {
     pub fn from_length(len: usize) -> LogIndex {
         LogIndex { value: len as u64 }
     }
+
+    pub fn next(self) -> LogIndex {
+        LogIndex {
+            value: self.value.saturating_add(1),
+        }
+    }
 }
 
 impl fmt::Display for LogIndex {
