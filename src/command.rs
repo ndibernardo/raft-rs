@@ -6,4 +6,6 @@ pub enum Command<C> {
     Send { to: NodeId, message: Message<C> },
     /// Reset the election timer.
     ResetElectionTimer,
+    /// Reset the heartbeat timer (leader only).
+    ResetHeartbeatTimer,
 }

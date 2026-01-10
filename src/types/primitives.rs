@@ -49,6 +49,16 @@ impl LogIndex {
         }
     }
 
+    pub fn prev(self) -> Option<LogIndex> {
+        if self.value == 0 {
+            None
+        } else {
+            Some(LogIndex {
+                value: self.value - 1,
+            })
+        }
+    }
+
     /// Convert to array index (0-based). Returns None for index 0.
     pub fn to_array_index(self) -> Option<usize> {
         if self.value == 0 {

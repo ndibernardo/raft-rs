@@ -34,7 +34,7 @@ pub struct Node<C> {
     pub role: Role,
 }
 
-impl<C> Node<C> {
+impl<C: Clone> Node<C> {
     /// Create a new node. Starts as follower with no known leader.
     pub fn new(id: NodeId, peers: Vec<NodeId>) -> Self {
         Self {
@@ -55,6 +55,13 @@ impl<C> Node<C> {
 
     fn last_log_index(&self) -> LogIndex {
         LogIndex::from_length(self.persistent.log.len())
+    }
+
+    /// Convert to follower state, updating term.
+    fn become_follower(&mut self, term: Term, leader_id: Option<NodeId>) {
+        self.persistent.current_term = term;
+        self.persistent.voted_for = None;
+        self.role = Role::Follower(Follower { leader_id });
     }
 
     fn last_log_term(&self) -> Term {
@@ -99,30 +106,27 @@ impl<C> Node<C> {
 
     /// Handle incoming RequestVote RPC.
     pub fn handle_request_vote(&mut self, from: NodeId, req: RequestVote) -> Vec<Command<C>> {
-        // If RPC request contains term > currentTerm, update currentTerm and convert to follower.
         if req.term > self.persistent.current_term {
-            self.persistent.current_term = req.term;
-            self.persistent.voted_for = None;
-            self.role = Role::Follower(Follower { leader_id: None });
+            self.become_follower(req.term, None);
         }
 
         let vote_granted = self.should_grant_vote(&req);
-
         if vote_granted {
             self.persistent.voted_for = Some(req.candidate_id);
         }
 
-        let response = RequestVoteResponse {
-            term: self.persistent.current_term,
-            vote_granted,
-        };
-
         vec![Command::Send {
             to: from,
-            message: Message::RequestVoteResponse(response),
+            message: Message::RequestVoteResponse(RequestVoteResponse {
+                term: self.persistent.current_term,
+                vote_granted,
+            }),
         }]
     }
 
+    /// Safety: granting votes to multiple candidates in the same term would break consensus.
+    /// We grant a vote only if: (1) candidate's term is current, (2) we haven't voted for
+    /// someone else this term, and (3) candidate's log is at least as up-to-date as ours.
     fn should_grant_vote(&self, req: &RequestVote) -> bool {
         let term_ok = req.term >= self.persistent.current_term;
         let vote_ok = match self.persistent.voted_for {
@@ -134,8 +138,9 @@ impl<C> Node<C> {
         term_ok && vote_ok && log_ok
     }
 
+    /// Election restriction: only candidates with all committed entries can become leader.
+    /// A log is "up-to-date" if its last entry has a higher term, or same term with >= index.
     fn is_log_up_to_date(&self, candidate_term: Term, candidate_index: LogIndex) -> bool {
-        // Compare (term, index) tuples lexicographically.
         (candidate_term, candidate_index) >= (self.last_log_term(), self.last_log_index())
     }
 
@@ -145,15 +150,12 @@ impl<C> Node<C> {
         from: NodeId,
         resp: RequestVoteResponse,
     ) -> Vec<Command<C>> {
-        use std::cmp::Ordering;
-
-        match resp.term.cmp(&self.persistent.current_term) {
-            Ordering::Less => return Vec::new(),
-            Ordering::Greater => {
-                self.step_down(resp.term, None);
-                return Vec::new();
-            }
-            Ordering::Equal => {}
+        if resp.term < self.persistent.current_term {
+            return Vec::new();
+        }
+        if resp.term > self.persistent.current_term {
+            self.become_follower(resp.term, None);
+            return Vec::new();
         }
 
         let Role::Candidate(ref mut candidate) = self.role else {
@@ -174,6 +176,8 @@ impl<C> Node<C> {
         }
     }
 
+    /// Initialize leader state: nextIndex = last log index + 1 (optimistic),
+    /// matchIndex = 0 (conservative). Immediately send heartbeats to establish authority.
     fn become_leader(&mut self) -> Vec<Command<C>> {
         let last_log_index = self.last_log_index();
 
@@ -190,8 +194,71 @@ impl<C> Node<C> {
                 .collect(),
         });
 
-        // Leader sends initial empty AppendEntries (heartbeats) to establish authority.
-        Vec::new()
+        self.send_heartbeats()
+    }
+
+    /// Called when heartbeat timer fires. Leader sends AppendEntries to all peers.
+    pub fn heartbeat_timeout(&mut self) -> Vec<Command<C>> {
+        match &self.role {
+            Role::Leader(_) => self.send_heartbeats(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn send_heartbeats(&self) -> Vec<Command<C>> {
+        let Role::Leader(leader) = &self.role else {
+            return Vec::new();
+        };
+
+        let mut commands = Vec::new();
+
+        for &peer in &self.peers {
+            let next_index = leader
+                .next_index
+                .iter()
+                .find(|(id, _)| *id == peer)
+                .map(|(_, idx)| *idx)
+                .unwrap_or_else(|| self.last_log_index().next());
+
+            let prev_log_index = next_index.prev().unwrap_or_default();
+            let prev_log_term = self.term_at(prev_log_index);
+
+            let entries = self.entries_from(next_index);
+
+            commands.push(Command::Send {
+                to: peer,
+                message: Message::AppendEntries(AppendEntries {
+                    term: self.persistent.current_term,
+                    leader_id: self.id,
+                    prev_log_index,
+                    prev_log_term,
+                    entries,
+                    leader_commit: self.volatile.commit_index,
+                }),
+            });
+        }
+
+        commands.push(Command::ResetHeartbeatTimer);
+        commands
+    }
+
+    fn term_at(&self, index: LogIndex) -> Term {
+        match index.to_array_index() {
+            None => Term::default(),
+            Some(idx) => self
+                .persistent
+                .log
+                .get(idx)
+                .map(|e| e.term)
+                .unwrap_or_default(),
+        }
+    }
+
+    fn entries_from(&self, start: LogIndex) -> Vec<LogEntry<C>> {
+        match start.to_array_index() {
+            None => self.persistent.log.clone(),
+            Some(idx) => self.persistent.log.get(idx..).unwrap_or_default().to_vec(),
+        }
     }
 
     /// Handle incoming AppendEntries RPC.
@@ -200,16 +267,9 @@ impl<C> Node<C> {
         from: NodeId,
         req: AppendEntries<C>,
     ) -> Vec<Command<C>> {
-        // If RPC request contains term > currentTerm, update and convert to follower.
         if req.term > self.persistent.current_term {
-            self.persistent.current_term = req.term;
-            self.persistent.voted_for = None;
-            self.role = Role::Follower(Follower {
-                leader_id: Some(req.leader_id),
-            });
+            self.become_follower(req.term, Some(req.leader_id));
         }
-
-        // Reply false if term < currentTerm.
         if req.term < self.persistent.current_term {
             return vec![Command::Send {
                 to: from,
@@ -221,18 +281,14 @@ impl<C> Node<C> {
             }];
         }
 
-        // Valid AppendEntries from current leader - reset election timer.
-        let mut commands = vec![Command::ResetElectionTimer];
-
-        // Update leader_id if we're a follower.
+        // Valid AppendEntries from current leader.
         if let Role::Follower(ref mut follower) = self.role {
             follower.leader_id = Some(req.leader_id);
         }
 
-        // Check if log contains entry at prevLogIndex with prevLogTerm.
-        let log_ok = self.check_log_consistency(req.prev_log_index, req.prev_log_term);
+        let mut commands = vec![Command::ResetElectionTimer];
 
-        if !log_ok {
+        if !self.check_log_consistency(req.prev_log_index, req.prev_log_term) {
             commands.push(Command::Send {
                 to: from,
                 message: Message::AppendEntriesResponse(AppendEntriesResponse {
@@ -244,13 +300,10 @@ impl<C> Node<C> {
             return commands;
         }
 
-        // Append new entries (handling conflicts).
         self.append_entries(req.prev_log_index, req.entries);
 
-        // Update commit index.
         if req.leader_commit > self.volatile.commit_index {
-            let last_new_entry = self.last_log_index();
-            self.volatile.commit_index = std::cmp::min(req.leader_commit, last_new_entry);
+            self.volatile.commit_index = std::cmp::min(req.leader_commit, self.last_log_index());
         }
 
         commands.push(Command::Send {
@@ -265,39 +318,37 @@ impl<C> Node<C> {
         commands
     }
 
+    /// Log Matching Property: if two logs contain an entry with the same index and term,
+    /// then the logs are identical in all entries up through that index.
     fn check_log_consistency(&self, prev_log_index: LogIndex, prev_log_term: Term) -> bool {
-        // If prevLogIndex is 0, consistency check passes (empty log prefix).
         if prev_log_index == LogIndex::default() {
             return prev_log_term == Term::default();
         }
 
-        // Check if we have an entry at prevLogIndex with matching term.
         match prev_log_index.to_array_index() {
             Some(idx) => self
                 .persistent
                 .log
                 .get(idx)
-                .map_or(false, |entry| entry.term == prev_log_term),
+                .is_some_and(|entry| entry.term == prev_log_term),
             None => false,
         }
     }
 
+    /// On conflict (same index, different term), delete the existing entry and all that follow.
+    /// This maintains the Log Matching Property by removing divergent suffix.
     fn append_entries(&mut self, prev_log_index: LogIndex, entries: Vec<LogEntry<C>>) {
         let mut insert_index = prev_log_index.next();
 
         for entry in entries {
             match insert_index.to_array_index() {
                 Some(idx) if idx < self.persistent.log.len() => {
-                    // Check for conflict.
                     if self.persistent.log[idx].term != entry.term {
-                        // Delete existing entry and all that follow.
                         self.persistent.log.truncate(idx);
                         self.persistent.log.push(entry);
                     }
-                    // If terms match, entry is already present - skip.
                 }
                 _ => {
-                    // Append new entry.
                     self.persistent.log.push(entry);
                 }
             }
