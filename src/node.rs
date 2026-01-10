@@ -356,3 +356,272 @@ impl<C: Clone> Node<C> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(id: u64, peers: &[u64]) -> Node<String> {
+        Node::new(
+            NodeId::from(id),
+            peers.iter().map(|&p| NodeId::from(p)).collect(),
+        )
+    }
+
+    fn is_follower(node: &Node<String>) -> bool {
+        matches!(node.role, Role::Follower(_))
+    }
+
+    fn is_candidate(node: &Node<String>) -> bool {
+        matches!(node.role, Role::Candidate(_))
+    }
+
+    fn is_leader(node: &Node<String>) -> bool {
+        matches!(node.role, Role::Leader(_))
+    }
+
+    fn extract_vote_granted(cmds: &[Command<String>]) -> bool {
+        cmds.iter()
+            .find_map(|c| match c {
+                Command::Send {
+                    message: Message::RequestVoteResponse(r),
+                    ..
+                } => Some(r.vote_granted),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn extract_append_success(cmds: &[Command<String>]) -> bool {
+        cmds.iter()
+            .find_map(|c| match c {
+                Command::Send {
+                    message: Message::AppendEntriesResponse(r),
+                    ..
+                } => Some(r.success),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn new_node_is_follower() {
+        let n = node(1, &[2, 3]);
+        assert!(is_follower(&n));
+        assert_eq!(n.persistent.current_term, Term::default());
+        assert_eq!(n.persistent.voted_for, None);
+    }
+
+    #[test]
+    fn election_timeout_starts_election() {
+        let mut n = node(1, &[2, 3]);
+        let commands = n.election_timeout();
+
+        assert!(is_candidate(&n));
+        assert_eq!(n.persistent.current_term, Term::from(1));
+        assert_eq!(n.persistent.voted_for, Some(NodeId::from(1)));
+
+        let send_count = commands
+            .iter()
+            .filter(|c| matches!(c, Command::Send { .. }))
+            .count();
+        assert_eq!(send_count, 2);
+    }
+
+    #[test]
+    fn candidate_becomes_leader_with_majority() {
+        let mut n = node(1, &[2, 3]);
+        n.election_timeout();
+
+        let resp = RequestVoteResponse {
+            term: Term::from(1),
+            vote_granted: true,
+        };
+        n.handle_request_vote_response(NodeId::from(2), resp);
+
+        assert!(is_leader(&n));
+    }
+
+    #[test]
+    fn candidate_stays_candidate_without_majority() {
+        let mut n = node(1, &[2, 3, 4, 5]);
+        n.election_timeout();
+
+        let resp = RequestVoteResponse {
+            term: Term::from(1),
+            vote_granted: true,
+        };
+        n.handle_request_vote_response(NodeId::from(2), resp);
+
+        assert!(is_candidate(&n));
+    }
+
+    #[test]
+    fn node_rejects_vote_if_already_voted() {
+        let mut n = node(1, &[2, 3]);
+
+        let req1 = RequestVote {
+            term: Term::from(1),
+            candidate_id: NodeId::from(2),
+            last_log_index: LogIndex::default(),
+            last_log_term: Term::default(),
+        };
+        let cmds = n.handle_request_vote(NodeId::from(2), req1);
+        assert!(extract_vote_granted(&cmds));
+
+        let req2 = RequestVote {
+            term: Term::from(1),
+            candidate_id: NodeId::from(3),
+            last_log_index: LogIndex::default(),
+            last_log_term: Term::default(),
+        };
+        let cmds = n.handle_request_vote(NodeId::from(3), req2);
+        assert!(!extract_vote_granted(&cmds));
+    }
+
+    #[test]
+    fn node_grants_vote_in_new_term() {
+        let mut n = node(1, &[2, 3]);
+        n.persistent.current_term = Term::from(1);
+        n.persistent.voted_for = Some(NodeId::from(2));
+
+        let req = RequestVote {
+            term: Term::from(2),
+            candidate_id: NodeId::from(3),
+            last_log_index: LogIndex::default(),
+            last_log_term: Term::default(),
+        };
+        let cmds = n.handle_request_vote(NodeId::from(3), req);
+        assert!(extract_vote_granted(&cmds));
+    }
+
+    #[test]
+    fn node_rejects_vote_with_stale_log() {
+        let mut n = node(1, &[2, 3]);
+        n.persistent.log.push(LogEntry {
+            term: Term::from(2),
+            command: "x".to_string(),
+        });
+
+        let req = RequestVote {
+            term: Term::from(2),
+            candidate_id: NodeId::from(2),
+            last_log_index: LogIndex::default(),
+            last_log_term: Term::default(),
+        };
+        let cmds = n.handle_request_vote(NodeId::from(2), req);
+        assert!(!extract_vote_granted(&cmds));
+    }
+
+    #[test]
+    fn append_entries_resets_election_timer() {
+        let mut n = node(1, &[2, 3]);
+
+        let req = AppendEntries {
+            term: Term::from(1),
+            leader_id: NodeId::from(2),
+            prev_log_index: LogIndex::default(),
+            prev_log_term: Term::default(),
+            entries: vec![],
+            leader_commit: LogIndex::default(),
+        };
+        let cmds = n.handle_append_entries(NodeId::from(2), req);
+
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, Command::ResetElectionTimer)));
+    }
+
+    #[test]
+    fn append_entries_rejects_stale_term() {
+        let mut n = node(1, &[2, 3]);
+        n.persistent.current_term = Term::from(5);
+
+        let req = AppendEntries {
+            term: Term::from(3),
+            leader_id: NodeId::from(2),
+            prev_log_index: LogIndex::default(),
+            prev_log_term: Term::default(),
+            entries: vec![],
+            leader_commit: LogIndex::default(),
+        };
+        let cmds = n.handle_append_entries(NodeId::from(2), req);
+        assert!(!extract_append_success(&cmds));
+    }
+
+    #[test]
+    fn append_entries_appends_new_entries() {
+        let mut n = node(1, &[2, 3]);
+
+        let req = AppendEntries {
+            term: Term::from(1),
+            leader_id: NodeId::from(2),
+            prev_log_index: LogIndex::default(),
+            prev_log_term: Term::default(),
+            entries: vec![
+                LogEntry {
+                    term: Term::from(1),
+                    command: "a".to_string(),
+                },
+                LogEntry {
+                    term: Term::from(1),
+                    command: "b".to_string(),
+                },
+            ],
+            leader_commit: LogIndex::default(),
+        };
+        n.handle_append_entries(NodeId::from(2), req);
+
+        assert_eq!(n.persistent.log.len(), 2);
+    }
+
+    #[test]
+    fn append_entries_truncates_on_conflict() {
+        let mut n = node(1, &[2, 3]);
+        n.persistent.log.push(LogEntry {
+            term: Term::from(1),
+            command: "old".to_string(),
+        });
+        n.persistent.log.push(LogEntry {
+            term: Term::from(1),
+            command: "conflict".to_string(),
+        });
+
+        let req = AppendEntries {
+            term: Term::from(2),
+            leader_id: NodeId::from(2),
+            prev_log_index: LogIndex::from(1),
+            prev_log_term: Term::from(1),
+            entries: vec![LogEntry {
+                term: Term::from(2),
+                command: "new".to_string(),
+            }],
+            leader_commit: LogIndex::default(),
+        };
+        n.handle_append_entries(NodeId::from(2), req);
+
+        assert_eq!(n.persistent.log.len(), 2);
+        assert_eq!(n.persistent.log[1].command, "new");
+        assert_eq!(n.persistent.log[1].term, Term::from(2));
+    }
+
+    #[test]
+    fn higher_term_converts_to_follower() {
+        let mut n = node(1, &[2, 3]);
+        n.election_timeout();
+        assert!(is_candidate(&n));
+
+        let req = AppendEntries {
+            term: Term::from(5),
+            leader_id: NodeId::from(2),
+            prev_log_index: LogIndex::default(),
+            prev_log_term: Term::default(),
+            entries: vec![],
+            leader_commit: LogIndex::default(),
+        };
+        n.handle_append_entries(NodeId::from(2), req);
+
+        assert!(is_follower(&n));
+        assert_eq!(n.persistent.current_term, Term::from(5));
+    }
+}
