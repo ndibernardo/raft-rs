@@ -335,6 +335,96 @@ impl<C: Clone> Node<C> {
         }
     }
 
+    /// Handle incoming AppendEntriesResponse RPC (leader only).
+    pub fn handle_append_entries_response(
+        &mut self,
+        from: NodeId,
+        resp: AppendEntriesResponse,
+    ) -> Vec<Command<C>> {
+        if resp.term > self.persistent.current_term {
+            self.become_follower(resp.term, None);
+            return Vec::new();
+        }
+        if resp.term < self.persistent.current_term {
+            return Vec::new();
+        }
+
+        let Role::Leader(ref mut leader) = self.role else {
+            return Vec::new();
+        };
+
+        if resp.success {
+            // Update matchIndex and nextIndex for this follower.
+            if let Some((_, match_idx)) = leader.match_index.iter_mut().find(|(id, _)| *id == from) {
+                *match_idx = resp.match_index;
+            }
+            if let Some((_, next_idx)) = leader.next_index.iter_mut().find(|(id, _)| *id == from) {
+                *next_idx = resp.match_index.next();
+            }
+
+            self.advance_commit_index();
+        } else {
+            // Decrement nextIndex for this follower. Retry happens on next heartbeat.
+            if let Some((_, next_idx)) = leader.next_index.iter_mut().find(|(id, _)| *id == from) {
+                if let Some(prev) = next_idx.prev() {
+                    *next_idx = prev;
+                }
+            }
+        }
+
+        Vec::new()
+    }
+
+    /// Submit a client command. Leader appends to log and triggers replication.
+    /// Returns the log index where the command was placed, or None if not leader.
+    pub fn submit_command(&mut self, command: C) -> Option<LogIndex> {
+        if !matches!(self.role, Role::Leader(_)) {
+            return None;
+        }
+
+        let entry = LogEntry {
+            term: self.persistent.current_term,
+            command,
+        };
+        self.persistent.log.push(entry);
+
+        Some(self.last_log_index())
+    }
+
+    /// Advance commitIndex if there exists N such that N > commitIndex, a majority of
+    /// matchIndex[i] >= N, and log[N].term == currentTerm. Leader can only commit entries
+    /// from its own term (Figure 8 safety).
+    fn advance_commit_index(&mut self) {
+        let Role::Leader(ref leader) = self.role else {
+            return;
+        };
+
+        // Collect match indices including leader's own implicit match.
+        let mut match_indices: Vec<LogIndex> =
+            leader.match_index.iter().map(|(_, idx)| *idx).collect();
+        match_indices.push(self.last_log_index());
+        match_indices.sort();
+
+        // Majority position: with N nodes, need (N/2 + 1) replicas.
+        // Sorted ascending, so match_indices[len/2] is the median.
+        let majority_pos = match_indices.len() / 2;
+        let majority_index = match_indices[majority_pos];
+
+        // Only commit if entry is from current term (Figure 8 safety).
+        if majority_index > self.volatile.commit_index {
+            if let Some(idx) = majority_index.to_array_index() {
+                if self
+                    .persistent
+                    .log
+                    .get(idx)
+                    .is_some_and(|e| e.term == self.persistent.current_term)
+                {
+                    self.volatile.commit_index = majority_index;
+                }
+            }
+        }
+    }
+
     /// On conflict (same index, different term), delete the existing entry and all that follow.
     /// This maintains the Log Matching Property by removing divergent suffix.
     fn append_entries(&mut self, prev_log_index: LogIndex, entries: Vec<LogEntry<C>>) {
@@ -623,5 +713,127 @@ mod tests {
 
         assert!(is_follower(&n));
         assert_eq!(n.persistent.current_term, Term::from(5));
+    }
+
+    #[test]
+    fn leader_advances_commit_index_on_majority() {
+        let mut n = node(1, &[2, 3]);
+        n.election_timeout();
+        n.handle_request_vote_response(
+            NodeId::from(2),
+            RequestVoteResponse {
+                term: Term::from(1),
+                vote_granted: true,
+            },
+        );
+        assert!(is_leader(&n));
+
+        // Submit a command.
+        let index = n.submit_command("cmd".to_string());
+        assert_eq!(index, Some(LogIndex::from(1)));
+
+        // Simulate successful replication to one follower.
+        n.handle_append_entries_response(
+            NodeId::from(2),
+            AppendEntriesResponse {
+                term: Term::from(1),
+                success: true,
+                match_index: LogIndex::from(1),
+            },
+        );
+
+        // With 3-node cluster, leader + 1 follower = majority.
+        assert_eq!(n.volatile.commit_index, LogIndex::from(1));
+    }
+
+    #[test]
+    fn leader_decrements_next_index_on_failure() {
+        let mut n = node(1, &[2, 3]);
+        n.election_timeout();
+        n.handle_request_vote_response(
+            NodeId::from(2),
+            RequestVoteResponse {
+                term: Term::from(1),
+                vote_granted: true,
+            },
+        );
+        assert!(is_leader(&n));
+
+        // Add entries to leader's log.
+        n.submit_command("a".to_string());
+        n.submit_command("b".to_string());
+
+        let Role::Leader(ref leader) = n.role else {
+            panic!("expected leader");
+        };
+        let initial_next = leader
+            .next_index
+            .iter()
+            .find(|(id, _)| *id == NodeId::from(2))
+            .map(|(_, idx)| *idx)
+            .unwrap();
+
+        // Simulate failed replication.
+        n.handle_append_entries_response(
+            NodeId::from(2),
+            AppendEntriesResponse {
+                term: Term::from(1),
+                success: false,
+                match_index: LogIndex::default(),
+            },
+        );
+
+        let Role::Leader(ref leader) = n.role else {
+            panic!("expected leader");
+        };
+        let new_next = leader
+            .next_index
+            .iter()
+            .find(|(id, _)| *id == NodeId::from(2))
+            .map(|(_, idx)| *idx)
+            .unwrap();
+
+        assert!(new_next < initial_next);
+    }
+
+    #[test]
+    fn submit_command_fails_on_non_leader() {
+        let mut n = node(1, &[2, 3]);
+        assert!(n.submit_command("cmd".to_string()).is_none());
+
+        n.election_timeout();
+        assert!(n.submit_command("cmd".to_string()).is_none());
+    }
+
+    #[test]
+    fn leader_does_not_commit_entries_from_previous_term() {
+        let mut n = node(1, &[2, 3]);
+        n.election_timeout();
+        n.handle_request_vote_response(
+            NodeId::from(2),
+            RequestVoteResponse {
+                term: Term::from(1),
+                vote_granted: true,
+            },
+        );
+
+        // Manually add an entry from a previous term (simulating log from old leader).
+        n.persistent.log.push(LogEntry {
+            term: Term::from(0),
+            command: "old".to_string(),
+        });
+
+        // Simulate successful replication.
+        n.handle_append_entries_response(
+            NodeId::from(2),
+            AppendEntriesResponse {
+                term: Term::from(1),
+                success: true,
+                match_index: LogIndex::from(1),
+            },
+        );
+
+        // Should not commit because entry is from term 0, not current term 1.
+        assert_eq!(n.volatile.commit_index, LogIndex::default());
     }
 }

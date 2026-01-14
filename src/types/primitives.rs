@@ -32,7 +32,7 @@ impl From<u64> for Term {
 ///
 /// LogIndex 0 represents "no entries" or "before the first entry".
 /// Valid log entries start at index 1.
-#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LogIndex {
     value: u64,
 }
