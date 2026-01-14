@@ -49,7 +49,7 @@ impl<C: Clone> Node<C> {
                 commit_index: LogIndex::default(),
                 last_applied: LogIndex::default(),
             },
-            role: Role::Follower(Follower { leader_id: None }),
+            role: Role::Follower(Follower::new()),
         }
     }
 
@@ -61,7 +61,11 @@ impl<C: Clone> Node<C> {
     fn become_follower(&mut self, term: Term, leader_id: Option<NodeId>) {
         self.persistent.current_term = term;
         self.persistent.voted_for = None;
-        self.role = Role::Follower(Follower { leader_id });
+        let mut follower = Follower::new();
+        if let Some(id) = leader_id {
+            follower.set_leader(id);
+        }
+        self.role = Role::Follower(follower);
     }
 
     fn last_log_term(&self) -> Term {
@@ -82,9 +86,7 @@ impl<C: Clone> Node<C> {
     fn start_election(&mut self) -> Vec<Command<C>> {
         self.persistent.current_term = self.persistent.current_term.increment();
         self.persistent.voted_for = Some(self.id);
-        self.role = Role::Candidate(Candidate {
-            votes_received: vec![self.id],
-        });
+        self.role = Role::Candidate(Candidate::new(self.id));
 
         let request = RequestVote {
             term: self.persistent.current_term,
@@ -158,18 +160,17 @@ impl<C: Clone> Node<C> {
             return Vec::new();
         }
 
-        let Role::Candidate(ref mut candidate) = self.role else {
-            return Vec::new();
+        let dominated = match &mut self.role {
+            Role::Candidate(candidate) => {
+                if resp.vote_granted {
+                    candidate.record_vote(from);
+                }
+                candidate.has_majority(self.peers.len() + 1)
+            }
+            Role::Follower(_) | Role::Leader(_) => return Vec::new(),
         };
 
-        if resp.vote_granted {
-            candidate.votes_received.push(from);
-        }
-
-        let cluster_size = self.peers.len() + 1;
-        let majority = cluster_size / 2 + 1;
-
-        if candidate.votes_received.len() >= majority {
+        if dominated {
             self.become_leader()
         } else {
             Vec::new()
@@ -179,21 +180,7 @@ impl<C: Clone> Node<C> {
     /// Initialize leader state: nextIndex = last log index + 1 (optimistic),
     /// matchIndex = 0 (conservative). Immediately send heartbeats to establish authority.
     fn become_leader(&mut self) -> Vec<Command<C>> {
-        let last_log_index = self.last_log_index();
-
-        self.role = Role::Leader(Leader {
-            next_index: self
-                .peers
-                .iter()
-                .map(|&peer| (peer, last_log_index.next()))
-                .collect(),
-            match_index: self
-                .peers
-                .iter()
-                .map(|&peer| (peer, LogIndex::default()))
-                .collect(),
-        });
-
+        self.role = Role::Leader(Leader::new(&self.peers, self.last_log_index()));
         self.send_heartbeats()
     }
 
@@ -214,10 +201,7 @@ impl<C: Clone> Node<C> {
 
         for &peer in &self.peers {
             let next_index = leader
-                .next_index
-                .iter()
-                .find(|(id, _)| *id == peer)
-                .map(|(_, idx)| *idx)
+                .next_index_for(peer)
                 .unwrap_or_else(|| self.last_log_index().next());
 
             let prev_log_index = next_index.prev().unwrap_or_default();
@@ -282,8 +266,8 @@ impl<C: Clone> Node<C> {
         }
 
         // Valid AppendEntries from current leader.
-        if let Role::Follower(ref mut follower) = self.role {
-            follower.leader_id = Some(req.leader_id);
+        if let Role::Follower(follower) = &mut self.role {
+            follower.set_leader(req.leader_id);
         }
 
         let mut commands = vec![Command::ResetElectionTimer];
@@ -349,27 +333,16 @@ impl<C: Clone> Node<C> {
             return Vec::new();
         }
 
-        let Role::Leader(ref mut leader) = self.role else {
-            return Vec::new();
-        };
-
-        if resp.success {
-            // Update matchIndex and nextIndex for this follower.
-            if let Some((_, match_idx)) = leader.match_index.iter_mut().find(|(id, _)| *id == from) {
-                *match_idx = resp.match_index;
-            }
-            if let Some((_, next_idx)) = leader.next_index.iter_mut().find(|(id, _)| *id == from) {
-                *next_idx = resp.match_index.next();
-            }
-
-            self.advance_commit_index();
-        } else {
-            // Decrement nextIndex for this follower. Retry happens on next heartbeat.
-            if let Some((_, next_idx)) = leader.next_index.iter_mut().find(|(id, _)| *id == from) {
-                if let Some(prev) = next_idx.prev() {
-                    *next_idx = prev;
+        match &mut self.role {
+            Role::Leader(leader) => {
+                if resp.success {
+                    leader.record_success(from, resp.match_index);
+                    self.advance_commit_index();
+                } else {
+                    leader.record_failure(from);
                 }
             }
+            Role::Follower(_) | Role::Candidate(_) => {}
         }
 
         Vec::new()
@@ -395,13 +368,12 @@ impl<C: Clone> Node<C> {
     /// matchIndex[i] >= N, and log[N].term == currentTerm. Leader can only commit entries
     /// from its own term (Figure 8 safety).
     fn advance_commit_index(&mut self) {
-        let Role::Leader(ref leader) = self.role else {
+        let Role::Leader(leader) = &self.role else {
             return;
         };
 
         // Collect match indices including leader's own implicit match.
-        let mut match_indices: Vec<LogIndex> =
-            leader.match_index.iter().map(|(_, idx)| *idx).collect();
+        let mut match_indices: Vec<LogIndex> = leader.match_indices().collect();
         match_indices.push(self.last_log_index());
         match_indices.sort();
 
@@ -763,15 +735,10 @@ mod tests {
         n.submit_command("a".to_string());
         n.submit_command("b".to_string());
 
-        let Role::Leader(ref leader) = n.role else {
+        let Role::Leader(leader) = &n.role else {
             panic!("expected leader");
         };
-        let initial_next = leader
-            .next_index
-            .iter()
-            .find(|(id, _)| *id == NodeId::from(2))
-            .map(|(_, idx)| *idx)
-            .unwrap();
+        let initial_next = leader.next_index_for(NodeId::from(2)).unwrap();
 
         // Simulate failed replication.
         n.handle_append_entries_response(
@@ -783,15 +750,10 @@ mod tests {
             },
         );
 
-        let Role::Leader(ref leader) = n.role else {
+        let Role::Leader(leader) = &n.role else {
             panic!("expected leader");
         };
-        let new_next = leader
-            .next_index
-            .iter()
-            .find(|(id, _)| *id == NodeId::from(2))
-            .map(|(_, idx)| *idx)
-            .unwrap();
+        let new_next = leader.next_index_for(NodeId::from(2)).unwrap();
 
         assert!(new_next < initial_next);
     }
