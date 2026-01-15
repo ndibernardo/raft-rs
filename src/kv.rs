@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use crate::runtime::StateMachine;
+
 /// Commands for the key-value store.
 #[derive(Clone, Debug)]
 pub enum KvCommand {
@@ -41,6 +43,14 @@ impl KvStore {
                 KvResult::Ok
             }
         }
+    }
+}
+
+impl StateMachine<KvCommand> for KvStore {
+    type Output = KvResult;
+
+    fn apply(&mut self, command: KvCommand) -> Self::Output {
+        KvStore::apply(self, command)
     }
 }
 
