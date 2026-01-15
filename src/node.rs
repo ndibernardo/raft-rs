@@ -397,6 +397,27 @@ impl<C: Clone> Node<C> {
         }
     }
 
+    /// Returns true if there are committed entries waiting to be applied.
+    pub fn has_pending_applies(&self) -> bool {
+        self.volatile.commit_index > self.volatile.last_applied
+    }
+
+    /// Take the next committed entry to apply. Returns None if all committed entries applied.
+    /// Caller should apply the command to the state machine and call this again.
+    pub fn take_entry_to_apply(&mut self) -> Option<&C> {
+        if self.volatile.last_applied >= self.volatile.commit_index {
+            return None;
+        }
+
+        self.volatile.last_applied = self.volatile.last_applied.next();
+
+        self.volatile
+            .last_applied
+            .to_array_index()
+            .and_then(|idx| self.persistent.log.get(idx))
+            .map(|entry| &entry.command)
+    }
+
     /// On conflict (same index, different term), delete the existing entry and all that follow.
     /// This maintains the Log Matching Property by removing divergent suffix.
     fn append_entries(&mut self, prev_log_index: LogIndex, entries: Vec<LogEntry<C>>) {
@@ -797,5 +818,50 @@ mod tests {
 
         // Should not commit because entry is from term 0, not current term 1.
         assert_eq!(n.volatile.commit_index, LogIndex::default());
+    }
+
+    #[test]
+    fn take_entry_to_apply_returns_committed_entries() {
+        let mut n = node(1, &[2, 3]);
+
+        // Add entries to log.
+        n.persistent.log.push(LogEntry {
+            term: Term::from(1),
+            command: "a".to_string(),
+        });
+        n.persistent.log.push(LogEntry {
+            term: Term::from(1),
+            command: "b".to_string(),
+        });
+
+        // Commit first entry.
+        n.volatile.commit_index = LogIndex::from(1);
+
+        assert!(n.has_pending_applies());
+        assert_eq!(n.take_entry_to_apply(), Some(&"a".to_string()));
+        assert!(!n.has_pending_applies());
+        assert_eq!(n.take_entry_to_apply(), None);
+
+        // Commit second entry.
+        n.volatile.commit_index = LogIndex::from(2);
+
+        assert!(n.has_pending_applies());
+        assert_eq!(n.take_entry_to_apply(), Some(&"b".to_string()));
+        assert!(!n.has_pending_applies());
+    }
+
+    #[test]
+    fn take_entry_to_apply_advances_last_applied() {
+        let mut n = node(1, &[2, 3]);
+
+        n.persistent.log.push(LogEntry {
+            term: Term::from(1),
+            command: "cmd".to_string(),
+        });
+        n.volatile.commit_index = LogIndex::from(1);
+
+        assert_eq!(n.volatile.last_applied, LogIndex::default());
+        n.take_entry_to_apply();
+        assert_eq!(n.volatile.last_applied, LogIndex::from(1));
     }
 }
