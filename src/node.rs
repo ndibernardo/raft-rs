@@ -88,6 +88,12 @@ impl<C: Clone> Node<C> {
         self.persistent.voted_for = Some(self.id);
         self.role = Role::Candidate(Candidate::new(self.id));
 
+        // Single node cluster: already have majority with own vote.
+        let cluster_size = self.peers.len() + 1;
+        if cluster_size == 1 {
+            return self.become_leader();
+        }
+
         let request = RequestVote {
             term: self.persistent.current_term,
             candidate_id: self.id,

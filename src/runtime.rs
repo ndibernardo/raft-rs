@@ -61,6 +61,10 @@ impl<C: Clone, S: StateMachine<C>> Runtime<C, S> {
         &self.state_machine
     }
 
+    pub fn state_machine_mut(&mut self) -> &mut S {
+        &mut self.state_machine
+    }
+
     /// Process an event and return commands to execute.
     pub fn handle(&mut self, event: Event<C>) -> Vec<Command<C>> {
         let commands = match event {
