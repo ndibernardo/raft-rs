@@ -60,6 +60,16 @@ impl<C: Clone, S: StateMachine<C> + Default> Cluster<C, S> {
         self.queue_commands(index, commands);
     }
 
+    /// Deliver one pending message. Returns true if a message was available.
+    pub fn deliver_one(&mut self) -> bool {
+        if let Some(msg) = self.messages.pop_front() {
+            self.deliver(msg);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Deliver all pending messages.
     pub fn deliver_all(&mut self) {
         while let Some(msg) = self.messages.pop_front() {
@@ -122,6 +132,128 @@ impl<C: Clone, S: StateMachine<C> + Default> Cluster<C, S> {
         }
 
         (followers, candidates, leaders)
+    }
+}
+
+#[cfg(test)]
+mod proptest_tests {
+    use std::collections::HashMap;
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::kv::{KvCommand, KvStore};
+    use crate::node::Role;
+    use crate::types::LogIndex;
+
+    const N: usize = 3;
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        ElectionTimeout(usize),
+        HeartbeatTimeout(usize),
+        DeliverOne,
+        DeliverAll,
+        Submit { node: usize, key: u8, val: u8 },
+    }
+
+    fn arb_op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            // delivery weighted higher so the cluster has a chance to make progress
+            3 => (0..N).prop_map(Op::ElectionTimeout),
+            2 => (0..N).prop_map(Op::HeartbeatTimeout),
+            5 => Just(Op::DeliverOne),
+            3 => Just(Op::DeliverAll),
+            2 => (0..N, 0u8..3u8, 0u8..3u8)
+                .prop_map(|(n, k, v)| Op::Submit { node: n, key: k, val: v }),
+        ]
+    }
+
+    fn apply(cluster: &mut Cluster<KvCommand, KvStore>, op: Op) {
+        const KEYS: [&str; 3] = ["a", "b", "c"];
+        const VALS: [&str; 3] = ["1", "2", "3"];
+        match op {
+            Op::ElectionTimeout(i) => cluster.election_timeout(i),
+            Op::HeartbeatTimeout(i) => cluster.heartbeat_timeout(i),
+            Op::DeliverOne => {
+                cluster.deliver_one();
+            }
+            Op::DeliverAll => cluster.deliver_all(),
+            Op::Submit { node, key, val } => {
+                let _ = cluster.runtime_mut(node).submit(KvCommand::Set {
+                    key: KEYS[key as usize].to_string(),
+                    value: VALS[val as usize].to_string(),
+                });
+            }
+        }
+    }
+
+    /// §5.2 Election Safety: at most one leader per term at any point in time.
+    fn check_election_safety(cluster: &Cluster<KvCommand, KvStore>) {
+        let mut leaders: HashMap<crate::types::Term, usize> = HashMap::new();
+        for i in 0..N {
+            let node = cluster.runtime(i).node();
+            if matches!(node.role, Role::Leader(_)) {
+                let term = node.persistent.current_term;
+                assert!(
+                    leaders.insert(term, i).is_none(),
+                    "election safety violated: two leaders in term {term}"
+                );
+            }
+        }
+    }
+
+    /// §5.4.3 State Machine Safety: if two nodes have both committed up to some
+    /// index, the committed entries at every position must be identical.
+    fn check_state_machine_safety(cluster: &Cluster<KvCommand, KvStore>) {
+        for i in 0..N {
+            for j in (i + 1)..N {
+                let ni = cluster.runtime(i).node();
+                let nj = cluster.runtime(j).node();
+                let min_commit =
+                    std::cmp::min(ni.volatile.commit_index, nj.volatile.commit_index);
+
+                let mut idx = LogIndex::from(1u64);
+                while idx <= min_commit {
+                    let ai = idx.to_array_index().unwrap();
+                    let ei = ni.persistent.log.get(ai).unwrap_or_else(|| {
+                        panic!(
+                            "node {i} has commit_index {min_commit} \
+                             but log only has {} entries",
+                            ni.persistent.log.len()
+                        )
+                    });
+                    let ej = nj.persistent.log.get(ai).unwrap_or_else(|| {
+                        panic!(
+                            "node {j} has commit_index {min_commit} \
+                             but log only has {} entries",
+                            nj.persistent.log.len()
+                        )
+                    });
+                    assert_eq!(
+                        (ei.term, &ei.command),
+                        (ej.term, &ej.command),
+                        "state machine safety violated at index {idx}: \
+                         nodes {i} and {j} have different committed entries"
+                    );
+                    idx = idx.next();
+                }
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(500))]
+
+        #[test]
+        fn safety_invariants_hold(ops in proptest::collection::vec(arb_op(), 1..=60)) {
+            let mut cluster: Cluster<KvCommand, KvStore> = Cluster::new(N);
+            for op in ops {
+                apply(&mut cluster, op);
+                check_election_safety(&cluster);
+                check_state_machine_safety(&cluster);
+            }
+        }
     }
 }
 

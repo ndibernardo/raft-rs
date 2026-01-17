@@ -3,7 +3,7 @@ use std::fmt;
 /// Monotonically increasing term number.
 ///
 /// Terms act as logical clocks in Raft and are used to detect stale information.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Term {
     value: u64,
 }

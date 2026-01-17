@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::runtime::StateMachine;
 
 /// Commands for the key-value store.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KvCommand {
     Get { key: String },
     Set { key: String, value: String },
