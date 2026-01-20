@@ -7,11 +7,11 @@ A Raft consensus implementation in Rust, designed as the foundation for a distri
 This library implements the Raft consensus algorithm as described in "In Search of an Understandable Consensus Algorithm" by Ongaro and Ousterhout. 
 The Raft layer is generic over command type. The key-value store is implemented as a state machine that applies committed log entries.
 
-## Features
+## Usage
 
-- Leader election with randomized timeouts
-- Log replication with consistency checks
-- Safety: at most one leader per term
+```bash
+cargo test
+```
 
 ## References
 
