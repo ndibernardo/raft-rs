@@ -83,9 +83,7 @@ impl Leader {
     /// Decrement next_index after failed replication.
     pub fn record_failure(&mut self, from: NodeId) {
         if let Some((_, idx)) = self.next_index.iter_mut().find(|(id, _)| *id == from) {
-            if let Some(prev) = idx.prev() {
-                *idx = prev;
-            }
+            *idx = idx.prev().unwrap_or(*idx);
         }
     }
 }

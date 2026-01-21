@@ -4,4 +4,5 @@ pub mod kv;
 pub mod node;
 pub mod runtime;
 pub mod state;
+pub mod storage;
 pub mod types;

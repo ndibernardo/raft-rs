@@ -1,5 +1,6 @@
 use crate::command::Command;
 use crate::state::{Candidate, Follower, Leader};
+use crate::storage::Storage;
 use crate::types::{
     AppendEntries, AppendEntriesResponse, LogEntry, LogIndex, Message, NodeId, RequestVote,
     RequestVoteResponse, Term,
@@ -10,6 +11,39 @@ pub struct PersistentState<C> {
     pub current_term: Term,
     pub voted_for: Option<NodeId>,
     pub log: Vec<LogEntry<C>>,
+}
+
+impl<C: Clone> PersistentState<C> {
+    /// Load persistent state from storage.
+    pub fn load<S: Storage<C>>(storage: &S) -> Result<Self, S::Error> {
+        Ok(Self {
+            current_term: storage.current_term()?,
+            voted_for: storage.voted_for()?,
+            log: storage.entries_from(LogIndex::from(1))?,
+        })
+    }
+
+    /// Save persistent state to storage.
+    pub fn save<S: Storage<C>>(&self, storage: &mut S) -> Result<(), S::Error> {
+        storage.set_current_term(self.current_term)?;
+        storage.set_voted_for(self.voted_for)?;
+
+        let stored_len = storage.last_log_index()?;
+        let current_len = LogIndex::from_length(self.log.len());
+
+        if stored_len > current_len {
+            storage.truncate_from(current_len.next())?;
+        }
+
+        for (idx, entry) in self.log.iter().enumerate() {
+            let log_index = LogIndex::from((idx + 1) as u64);
+            if log_index > stored_len {
+                storage.append(entry.clone())?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Volatile state on all servers.
@@ -51,6 +85,30 @@ impl<C: Clone> Node<C> {
             },
             role: Role::Follower(Follower::new()),
         }
+    }
+
+    /// Create a node from persistent storage. Used for crash recovery.
+    pub fn from_storage<S: Storage<C>>(
+        id: NodeId,
+        peers: Vec<NodeId>,
+        storage: &S,
+    ) -> Result<Self, S::Error> {
+        let persistent = PersistentState::load(storage)?;
+        Ok(Self {
+            id,
+            peers,
+            persistent,
+            volatile: VolatileState {
+                commit_index: LogIndex::default(),
+                last_applied: LogIndex::default(),
+            },
+            role: Role::Follower(Follower::new()),
+        })
+    }
+
+    /// Save current persistent state to storage.
+    pub fn save<S: Storage<C>>(&self, storage: &mut S) -> Result<(), S::Error> {
+        self.persistent.save(storage)
     }
 
     fn last_log_index(&self) -> LogIndex {
@@ -389,17 +447,14 @@ impl<C: Clone> Node<C> {
         let majority_index = match_indices[majority_pos];
 
         // Only commit if entry is from current term (Figure 8 safety).
-        if majority_index > self.volatile.commit_index {
-            if let Some(idx) = majority_index.to_array_index() {
-                if self
-                    .persistent
-                    .log
-                    .get(idx)
-                    .is_some_and(|e| e.term == self.persistent.current_term)
-                {
-                    self.volatile.commit_index = majority_index;
-                }
-            }
+        let has_higher_index = majority_index > self.volatile.commit_index;
+        let is_current_term = majority_index
+            .to_array_index()
+            .and_then(|idx| self.persistent.log.get(idx))
+            .is_some_and(|e| e.term == self.persistent.current_term);
+
+        if has_higher_index && is_current_term {
+            self.volatile.commit_index = majority_index;
         }
     }
 
@@ -869,5 +924,37 @@ mod tests {
         assert_eq!(n.volatile.last_applied, LogIndex::default());
         n.take_entry_to_apply();
         assert_eq!(n.volatile.last_applied, LogIndex::from(1));
+    }
+
+    #[test]
+    fn save_and_load_persistent_state() {
+        use crate::storage::MemoryStorage;
+
+        let mut n = node(1, &[2, 3]);
+        n.election_timeout();
+        n.handle_request_vote_response(
+            NodeId::from(2),
+            RequestVoteResponse {
+                term: Term::from(1),
+                vote_granted: true,
+            },
+        );
+        n.submit_command("cmd1".to_string());
+        n.submit_command("cmd2".to_string());
+
+        let mut storage = MemoryStorage::new();
+        n.save(&mut storage).unwrap();
+
+        let restored: Node<String> =
+            Node::from_storage(NodeId::from(1), vec![NodeId::from(2), NodeId::from(3)], &storage)
+                .unwrap();
+
+        assert_eq!(
+            restored.persistent.current_term,
+            n.persistent.current_term
+        );
+        assert_eq!(restored.persistent.voted_for, n.persistent.voted_for);
+        assert_eq!(restored.persistent.log.len(), n.persistent.log.len());
+        assert!(is_follower(&restored));
     }
 }
