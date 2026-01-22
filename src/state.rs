@@ -1,6 +1,7 @@
 use crate::types::{LogIndex, NodeId};
 
-/// Follower state - passive, responds to RPCs.
+/// §5.1: followers are passive — they issue no requests, only respond to RPCs from
+/// leaders and candidates. If a follower receives no communication, it starts an election.
 pub struct Follower {
     pub leader_id: Option<NodeId>,
 }
@@ -21,7 +22,8 @@ impl Default for Follower {
     }
 }
 
-/// Candidate state - actively seeking votes.
+/// §5.2: a candidate requests votes from peers to win an election. It votes for itself
+/// and wins if it receives votes from a majority of servers in the full cluster.
 pub struct Candidate {
     votes_received: Vec<NodeId>,
 }
@@ -37,19 +39,24 @@ impl Candidate {
         self.votes_received.push(from);
     }
 
+    // §5.2: a candidate wins the election if it receives votes from a majority
+    // of the servers in the full cluster (⌊N/2⌋ + 1 out of N servers).
     pub fn has_majority(&self, cluster_size: usize) -> bool {
         let majority = cluster_size / 2 + 1;
         self.votes_received.len() >= majority
     }
 }
 
-/// Leader state - manages replication.
+/// §5.3, Figure 2, Volatile state on leaders (reinitialized after election).
+/// The leader maintains next_index and match_index for each follower to track replication.
 pub struct Leader {
-    next_index: Vec<(NodeId, LogIndex)>,
-    match_index: Vec<(NodeId, LogIndex)>,
+    next_index: Vec<(NodeId, LogIndex)>,  // next log index to send to each server
+    match_index: Vec<(NodeId, LogIndex)>, // highest log index known to be replicated
 }
 
 impl Leader {
+    // nextIndex initialized to leader last log index + 1 (optimistic).
+    // matchIndex initialized to 0 (conservative, increases monotonically).
     pub fn new(peers: &[NodeId], last_log_index: LogIndex) -> Self {
         Self {
             next_index: peers.iter().map(|&p| (p, last_log_index.next())).collect(),

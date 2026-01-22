@@ -79,7 +79,9 @@ impl<C: Clone, S: StateMachine<C>> Runtime<C, S> {
         commands
     }
 
-    /// Check timers and return any triggered events.
+    /// §5.2: if election timeout elapses without receiving AppendEntries or granting a vote,
+    /// the server starts an election. Leaders suppress elections by sending heartbeats
+    /// within each interval. Timeouts should be randomized in [T, 2T] to avoid split votes.
     pub fn poll_timers(&self) -> Option<Event<C>> {
         let now = Instant::now();
 
@@ -135,6 +137,8 @@ impl<C: Clone, S: StateMachine<C>> Runtime<C, S> {
         }
     }
 
+    // Figure 2, Rules for Servers (All Servers): if commitIndex > lastApplied, apply the
+    // next entry to the state machine. §5.3: state machines process entries in log order.
     fn apply_committed(&mut self) {
         while let Some(applied) = self.node.take_entry_to_apply() {
             self.state_machine.apply(applied.command.clone());

@@ -6,11 +6,12 @@ use crate::types::{
     RequestVoteResponse, Term,
 };
 
-/// Persistent state on all servers.
+/// Persistent state on all servers. Must survive crashes — updated on stable storage
+/// before responding to RPCs. Figure 2, State (persistent state on all servers).
 pub struct PersistentState<C> {
-    pub current_term: Term,
-    pub voted_for: Option<NodeId>,
-    pub log: Vec<LogEntry<C>>,
+    pub current_term: Term,    // latest term server has seen (initialized to 0)
+    pub voted_for: Option<NodeId>, // candidateId that received vote in current term
+    pub log: Vec<LogEntry<C>>, // log entries; each entry contains command and term
 }
 
 impl<C: Clone> PersistentState<C> {
@@ -46,10 +47,11 @@ impl<C: Clone> PersistentState<C> {
     }
 }
 
-/// Volatile state on all servers.
+/// Volatile state on all servers. Reinitialized after a crash.
+/// Figure 2, State (volatile state on all servers).
 pub struct VolatileState {
-    pub commit_index: LogIndex,
-    pub last_applied: LogIndex,
+    pub commit_index: LogIndex, // index of highest log entry known to be committed
+    pub last_applied: LogIndex, // index of highest log entry applied to state machine
 }
 
 /// Server role with associated state.
@@ -148,6 +150,8 @@ impl<C: Clone> Node<C> {
         }
     }
 
+    // §5.2: on election timeout, increment currentTerm, vote for self,
+    // reset election timer, send RequestVote to all other servers.
     fn start_election(&mut self) -> Vec<Command<C>> {
         self.persistent.current_term = self.persistent.current_term.increment();
         self.persistent.voted_for = Some(self.id);
@@ -177,7 +181,7 @@ impl<C: Clone> Node<C> {
         commands
     }
 
-    /// Handle incoming RequestVote RPC.
+    /// Handle incoming RequestVote RPC. Figure 2, RequestVote RPC (receiver implementation).
     pub fn handle_request_vote(&mut self, from: NodeId, req: RequestVote) -> Vec<Command<C>> {
         if req.term > self.persistent.current_term {
             self.become_follower(req.term, None);
@@ -197,9 +201,9 @@ impl<C: Clone> Node<C> {
         }]
     }
 
-    /// Safety: granting votes to multiple candidates in the same term would break consensus.
-    /// We grant a vote only if: (1) candidate's term is current, (2) we haven't voted for
-    /// someone else this term, and (3) candidate's log is at least as up-to-date as ours.
+    /// Grant vote only if all three conditions hold. Figure 2, RequestVote RPC §1–2:
+    /// (1) candidate's term is current, (2) we haven't voted for someone else this term,
+    /// (3) candidate's log is at least as up-to-date as ours (§5.4.1).
     fn should_grant_vote(&self, req: &RequestVote) -> bool {
         let term_ok = req.term >= self.persistent.current_term;
         let vote_ok = match self.persistent.voted_for {
@@ -211,8 +215,8 @@ impl<C: Clone> Node<C> {
         term_ok && vote_ok && log_ok
     }
 
-    /// Election restriction: only candidates with all committed entries can become leader.
-    /// A log is "up-to-date" if its last entry has a higher term, or same term with >= index.
+    /// §5.4.1: the candidate's log must be at least as up-to-date as any other log in the
+    /// cluster. Determined by comparing the last entry's term, then index.
     fn is_log_up_to_date(&self, candidate_term: Term, candidate_index: LogIndex) -> bool {
         (candidate_term, candidate_index) >= (self.last_log_term(), self.last_log_index())
     }
@@ -248,8 +252,8 @@ impl<C: Clone> Node<C> {
         }
     }
 
-    /// Initialize leader state: nextIndex = last log index + 1 (optimistic),
-    /// matchIndex = 0 (conservative). Immediately send heartbeats to establish authority.
+    /// §5.2: upon winning the election, send initial empty AppendEntries (heartbeats) to
+    /// each server. Figure 2, Rules for Servers (Leaders): initialize nextIndex and matchIndex.
     fn become_leader(&mut self) -> Vec<Command<C>> {
         self.role = Role::Leader(Leader::new(&self.peers, self.last_log_index()));
         self.send_heartbeats()
@@ -263,6 +267,8 @@ impl<C: Clone> Node<C> {
         }
     }
 
+    // §5.3, Figure 2, AppendEntries RPC (sender): for each peer, send entries starting at
+    // nextIndex. prev_log_index/term let the follower verify log consistency.
     fn send_heartbeats(&self) -> Vec<Command<C>> {
         let Role::Leader(leader) = &self.role else {
             return Vec::new();
@@ -316,7 +322,7 @@ impl<C: Clone> Node<C> {
         }
     }
 
-    /// Handle incoming AppendEntries RPC.
+    /// Handle incoming AppendEntries RPC. Figure 2, AppendEntries RPC (receiver implementation).
     pub fn handle_append_entries(
         &mut self,
         from: NodeId,
@@ -373,8 +379,9 @@ impl<C: Clone> Node<C> {
         commands
     }
 
-    /// Log Matching Property: if two logs contain an entry with the same index and term,
-    /// then the logs are identical in all entries up through that index.
+    /// §5.3 Log Matching Property: if two logs have an entry with the same index and term,
+    /// they are identical in all entries up through that index. Verified by checking
+    /// prev_log_index and prev_log_term before accepting new entries. Figure 2, §2.
     fn check_log_consistency(&self, prev_log_index: LogIndex, prev_log_term: Term) -> bool {
         if prev_log_index == LogIndex::default() {
             return prev_log_term == Term::default();
@@ -419,8 +426,9 @@ impl<C: Clone> Node<C> {
         Vec::new()
     }
 
-    /// Submit a client command. Leader appends to log and triggers replication.
-    /// Returns the log index where the command was placed, or None if not leader.
+    /// §5.3: leader appends the command to its log as a new entry, then issues
+    /// AppendEntries in parallel to replicate. Returns the assigned log index, or None if
+    /// not leader. Figure 2, Rules for Servers (Leaders) §2.
     pub fn submit_command(&mut self, command: C) -> Option<LogIndex> {
         if !matches!(self.role, Role::Leader(_)) {
             return None;
@@ -435,9 +443,10 @@ impl<C: Clone> Node<C> {
         Some(self.last_log_index())
     }
 
-    /// Advance commitIndex if there exists N such that N > commitIndex, a majority of
-    /// matchIndex[i] >= N, and log[N].term == currentTerm. Leader can only commit entries
-    /// from its own term (Figure 8 safety).
+    /// Figure 2, Rules for Servers (Leaders): if there exists N > commitIndex such that a
+    /// majority of matchIndex[i] >= N and log[N].term == currentTerm, set commitIndex = N.
+    /// §5.4.2, Figure 8: a leader may only commit entries from its current term directly;
+    /// earlier entries are committed indirectly by the Log Matching Property.
     fn advance_commit_index(&mut self) {
         let Role::Leader(leader) = &self.role else {
             return;
@@ -470,8 +479,8 @@ impl<C: Clone> Node<C> {
         self.volatile.commit_index > self.volatile.last_applied
     }
 
-    /// Take the next committed entry to apply. Returns None if all committed entries applied.
-    /// Caller should apply the command to the state machine and call this again.
+    /// Figure 2, Rules for Servers (All Servers): if commitIndex > lastApplied, increment
+    /// lastApplied and apply log[lastApplied] to the state machine. §5.3.
     pub fn take_entry_to_apply(&mut self) -> Option<Applied<'_, C>> {
         if self.volatile.last_applied >= self.volatile.commit_index {
             return None;
@@ -490,8 +499,8 @@ impl<C: Clone> Node<C> {
             })
     }
 
-    /// On conflict (same index, different term), delete the existing entry and all that follow.
-    /// This maintains the Log Matching Property by removing divergent suffix.
+    /// §5.3, Figure 2, AppendEntries RPC §3–5: if an existing entry conflicts with a new one
+    /// (same index, different term), delete it and all that follow, then append new entries.
     fn append_entries(&mut self, prev_log_index: LogIndex, entries: Vec<LogEntry<C>>) {
         let mut insert_index = prev_log_index.next();
 

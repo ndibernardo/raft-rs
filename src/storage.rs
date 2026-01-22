@@ -1,10 +1,9 @@
 use crate::types::{LogEntry, LogIndex, NodeId, Term};
 
-/// Storage abstraction for Raft persistent state.
-///
-/// Implementations must ensure durability before returning from mutating methods.
-/// The Raft algorithm requires that currentTerm, votedFor, and log entries
-/// survive crashes to maintain safety guarantees.
+/// Storage abstraction for Raft persistent state. §5.1, Figure 2 (Persistent state on all
+/// servers): currentTerm, votedFor, and log must be stored on stable storage and survive
+/// crashes. Implementations must flush to durable media before returning from any mutating
+/// method — responding to an RPC before persisting violates Raft's safety guarantees.
 pub trait Storage<C> {
     type Error;
 
