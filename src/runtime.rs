@@ -136,8 +136,8 @@ impl<C: Clone, S: StateMachine<C>> Runtime<C, S> {
     }
 
     fn apply_committed(&mut self) {
-        while let Some(command) = self.node.take_entry_to_apply() {
-            self.state_machine.apply(command.clone());
+        while let Some(applied) = self.node.take_entry_to_apply() {
+            self.state_machine.apply(applied.command.clone());
         }
     }
 }

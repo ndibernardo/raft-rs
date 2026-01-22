@@ -59,6 +59,13 @@ pub enum Role {
     Leader(Leader),
 }
 
+/// A committed entry ready to apply to the state machine.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Applied<'a, C> {
+    pub index: LogIndex,
+    pub command: &'a C,
+}
+
 /// A Raft node.
 pub struct Node<C> {
     pub id: NodeId,
@@ -465,18 +472,22 @@ impl<C: Clone> Node<C> {
 
     /// Take the next committed entry to apply. Returns None if all committed entries applied.
     /// Caller should apply the command to the state machine and call this again.
-    pub fn take_entry_to_apply(&mut self) -> Option<&C> {
+    pub fn take_entry_to_apply(&mut self) -> Option<Applied<'_, C>> {
         if self.volatile.last_applied >= self.volatile.commit_index {
             return None;
         }
 
         self.volatile.last_applied = self.volatile.last_applied.next();
+        let index = self.volatile.last_applied;
 
         self.volatile
             .last_applied
             .to_array_index()
             .and_then(|idx| self.persistent.log.get(idx))
-            .map(|entry| &entry.command)
+            .map(|entry| Applied {
+                index,
+                command: &entry.command,
+            })
     }
 
     /// On conflict (same index, different term), delete the existing entry and all that follow.
@@ -899,15 +910,19 @@ mod tests {
         n.volatile.commit_index = LogIndex::from(1);
 
         assert!(n.has_pending_applies());
-        assert_eq!(n.take_entry_to_apply(), Some(&"a".to_string()));
+        let applied = n.take_entry_to_apply().unwrap();
+        assert_eq!(applied.index, LogIndex::from(1));
+        assert_eq!(applied.command, &"a".to_string());
         assert!(!n.has_pending_applies());
-        assert_eq!(n.take_entry_to_apply(), None);
+        assert!(n.take_entry_to_apply().is_none());
 
         // Commit second entry.
         n.volatile.commit_index = LogIndex::from(2);
 
         assert!(n.has_pending_applies());
-        assert_eq!(n.take_entry_to_apply(), Some(&"b".to_string()));
+        let applied = n.take_entry_to_apply().unwrap();
+        assert_eq!(applied.index, LogIndex::from(2));
+        assert_eq!(applied.command, &"b".to_string());
         assert!(!n.has_pending_applies());
     }
 
