@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use crate::command::Command;
 use crate::node::{Node, Role};
 use crate::runtime::{Runtime, StateMachine, TimerConfig};
+use crate::storage::MemoryStorage;
 use crate::types::{Message, NodeId};
 
 /// A message in flight between nodes.
@@ -12,9 +13,9 @@ struct InFlight<C> {
     message: Message<C>,
 }
 
-/// Simulated cluster for testing.
+/// Simulated cluster for testing. Uses MemoryStorage on every node.
 pub struct Cluster<C, S> {
-    runtimes: Vec<Runtime<C, S>>,
+    runtimes: Vec<Runtime<C, S, MemoryStorage<C>>>,
     messages: VecDeque<InFlight<C>>,
 }
 
@@ -28,7 +29,7 @@ impl<C: Clone, S: StateMachine<C> + Default> Cluster<C, S> {
             .map(|&id| {
                 let peers: Vec<NodeId> = ids.iter().filter(|&&p| p != id).copied().collect();
                 let node = Node::new(id, peers);
-                Runtime::new(node, S::default(), TimerConfig::default())
+                Runtime::new(node, S::default(), MemoryStorage::new(), TimerConfig::default())
             })
             .collect();
 
@@ -39,24 +40,28 @@ impl<C: Clone, S: StateMachine<C> + Default> Cluster<C, S> {
     }
 
     /// Get a reference to a node's runtime by index (0-based).
-    pub fn runtime(&self, index: usize) -> &Runtime<C, S> {
+    pub fn runtime(&self, index: usize) -> &Runtime<C, S, MemoryStorage<C>> {
         &self.runtimes[index]
     }
 
     /// Get a mutable reference to a node's runtime by index (0-based).
-    pub fn runtime_mut(&mut self, index: usize) -> &mut Runtime<C, S> {
+    pub fn runtime_mut(&mut self, index: usize) -> &mut Runtime<C, S, MemoryStorage<C>> {
         &mut self.runtimes[index]
     }
 
     /// Trigger election timeout on a specific node.
     pub fn election_timeout(&mut self, index: usize) {
-        let commands = self.runtimes[index].handle(crate::runtime::Event::ElectionTimeout);
+        let commands = self.runtimes[index]
+            .handle(crate::runtime::Event::ElectionTimeout)
+            .unwrap();
         self.queue_commands(index, commands);
     }
 
     /// Trigger heartbeat timeout on a specific node.
     pub fn heartbeat_timeout(&mut self, index: usize) {
-        let commands = self.runtimes[index].handle(crate::runtime::Event::HeartbeatTimeout);
+        let commands = self.runtimes[index]
+            .handle(crate::runtime::Event::HeartbeatTimeout)
+            .unwrap();
         self.queue_commands(index, commands);
     }
 
@@ -81,10 +86,12 @@ impl<C: Clone, S: StateMachine<C> + Default> Cluster<C, S> {
     fn deliver(&mut self, inflight: InFlight<C>) {
         let to_index = self.node_index(inflight.to);
         if let Some(index) = to_index {
-            let commands = self.runtimes[index].handle(crate::runtime::Event::Message {
-                from: inflight.from,
-                message: inflight.message,
-            });
+            let commands = self.runtimes[index]
+                .handle(crate::runtime::Event::Message {
+                    from: inflight.from,
+                    message: inflight.message,
+                })
+                .unwrap();
             self.queue_commands(index, commands);
         }
     }

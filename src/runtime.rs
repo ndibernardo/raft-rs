@@ -4,6 +4,7 @@ use rand::Rng;
 
 use crate::command::Command;
 use crate::node::{Node, Role};
+use crate::storage::Storage;
 use crate::types::{LogIndex, Message, NodeId};
 
 /// Trait for state machines that can apply commands.
@@ -34,21 +35,23 @@ impl Default for TimerConfig {
     }
 }
 
-/// Runtime that wraps a Raft node with timer management.
-pub struct Runtime<C, S> {
+/// Runtime that wraps a Raft node with timer management and durable storage.
+pub struct Runtime<C, S, St> {
     node: Node<C>,
     state_machine: S,
+    storage: St,
     config: TimerConfig,
     election_deadline: Instant,
     heartbeat_deadline: Instant,
 }
 
-impl<C: Clone, S: StateMachine<C>> Runtime<C, S> {
-    pub fn new(node: Node<C>, state_machine: S, config: TimerConfig) -> Self {
+impl<C: Clone, S: StateMachine<C>, St: Storage<C>> Runtime<C, S, St> {
+    pub fn new(node: Node<C>, state_machine: S, storage: St, config: TimerConfig) -> Self {
         let now = Instant::now();
         Self {
             node,
             state_machine,
+            storage,
             election_deadline: now + config.election_timeout,
             heartbeat_deadline: now + config.heartbeat_interval,
             config,
@@ -67,8 +70,10 @@ impl<C: Clone, S: StateMachine<C>> Runtime<C, S> {
         &mut self.state_machine
     }
 
-    /// Process an event and return commands to execute.
-    pub fn handle(&mut self, event: Event<C>) -> Vec<Command<C>> {
+    /// Process an event, persist state, apply committed entries, and return outbound commands.
+    /// Persistent state is saved before returning — callers must not send responses until
+    /// this method returns successfully, matching the durability requirement of §5.1.
+    pub fn handle(&mut self, event: Event<C>) -> Result<Vec<Command<C>>, St::Error> {
         let commands = match event {
             Event::ElectionTimeout => self.node.election_timeout(),
             Event::HeartbeatTimeout => self.node.heartbeat_timeout(),
@@ -76,9 +81,10 @@ impl<C: Clone, S: StateMachine<C>> Runtime<C, S> {
         };
 
         self.process_commands(&commands);
+        self.node.save(&mut self.storage)?;
         self.apply_committed();
 
-        commands
+        Ok(commands)
     }
 
     /// §5.2: if election timeout elapses without receiving AppendEntries or granting a vote,
@@ -156,21 +162,22 @@ impl<C: Clone, S: StateMachine<C>> Runtime<C, S> {
 mod tests {
     use super::*;
     use crate::kv::{KvCommand, KvResult, KvStore};
+    use crate::storage::MemoryStorage;
     use crate::types::{AppendEntriesResponse, RequestVoteResponse, Term};
 
-    fn runtime(id: u64, peers: &[u64]) -> Runtime<KvCommand, KvStore> {
+    fn runtime(id: u64, peers: &[u64]) -> Runtime<KvCommand, KvStore, MemoryStorage<KvCommand>> {
         let node = Node::new(
             NodeId::from(id),
             peers.iter().map(|&p| NodeId::from(p)).collect(),
         );
-        Runtime::new(node, KvStore::new(), TimerConfig::default())
+        Runtime::new(node, KvStore::new(), MemoryStorage::new(), TimerConfig::default())
     }
 
     #[test]
     fn election_timeout_starts_election() {
         let mut rt = runtime(1, &[2, 3]);
 
-        let commands = rt.handle(Event::ElectionTimeout);
+        let commands = rt.handle(Event::ElectionTimeout).unwrap();
 
         assert!(matches!(rt.node().role, Role::Candidate(_)));
         assert!(!commands.is_empty());
@@ -181,14 +188,15 @@ mod tests {
         let mut rt = runtime(1, &[2, 3]);
 
         // Become leader.
-        rt.handle(Event::ElectionTimeout);
+        rt.handle(Event::ElectionTimeout).unwrap();
         rt.handle(Event::Message {
             from: NodeId::from(2),
             message: Message::RequestVoteResponse(RequestVoteResponse {
                 term: Term::from(1),
                 vote_granted: true,
             }),
-        });
+        })
+        .unwrap();
         assert!(matches!(rt.node().role, Role::Leader(_)));
 
         // Submit command.
@@ -206,7 +214,8 @@ mod tests {
                 success: true,
                 match_index: LogIndex::from(1),
             }),
-        });
+        })
+        .unwrap();
 
         // Verify command was applied to state machine.
         let result = rt.state_machine.apply(KvCommand::Get {
@@ -221,7 +230,7 @@ mod tests {
         let initial_deadline = rt.election_deadline;
 
         std::thread::sleep(Duration::from_millis(10));
-        rt.handle(Event::ElectionTimeout);
+        rt.handle(Event::ElectionTimeout).unwrap();
 
         assert!(rt.election_deadline > initial_deadline);
     }
