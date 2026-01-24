@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use rand::Rng;
+
 use crate::command::Command;
 use crate::node::{Node, Role};
 use crate::types::{LogIndex, Message, NodeId};
@@ -125,7 +127,11 @@ impl<C: Clone, S: StateMachine<C>> Runtime<C, S> {
         for command in commands {
             match command {
                 Command::ResetElectionTimer => {
-                    self.election_deadline = Instant::now() + self.config.election_timeout;
+                    // §5.2: randomize in [T, 2T] so nodes time out at different moments,
+                    // preventing repeated split votes when multiple candidates start at once.
+                    let base = self.config.election_timeout;
+                    let jitter_ms = rand::rng().random_range(0..base.as_millis() as u64);
+                    self.election_deadline = Instant::now() + base + Duration::from_millis(jitter_ms);
                 }
                 Command::ResetHeartbeatTimer => {
                     self.heartbeat_deadline = Instant::now() + self.config.heartbeat_interval;
