@@ -124,10 +124,14 @@ impl<C: Clone> Node<C> {
         LogIndex::from_length(self.persistent.log.len())
     }
 
-    /// Convert to follower state, updating term.
+    /// Convert to follower state. Only resets voted_for when moving to a newer term —
+    /// stepping down within the same term (e.g. candidate hearing from current leader)
+    /// must preserve the existing vote to uphold the at-most-one-vote-per-term invariant.
     fn become_follower(&mut self, term: Term, leader_id: Option<NodeId>) {
-        self.persistent.current_term = term;
-        self.persistent.voted_for = None;
+        if term > self.persistent.current_term {
+            self.persistent.current_term = term;
+            self.persistent.voted_for = None;
+        }
         let mut follower = Follower::new();
         if let Some(id) = leader_id {
             follower.set_leader(id);
@@ -340,6 +344,12 @@ impl<C: Clone> Node<C> {
                     match_index: LogIndex::default(),
                 }),
             }];
+        }
+
+        // §5.2: a candidate that hears from a leader in its own term must step down.
+        // voted_for is kept — we already voted for ourselves this term and that is valid.
+        if matches!(self.role, Role::Candidate(_)) {
+            self.become_follower(req.term, Some(req.leader_id));
         }
 
         // Valid AppendEntries from current leader.
@@ -948,6 +958,28 @@ mod tests {
         assert_eq!(n.volatile.last_applied, LogIndex::default());
         n.take_entry_to_apply();
         assert_eq!(n.volatile.last_applied, LogIndex::from(1));
+    }
+
+    #[test]
+    fn candidate_steps_down_on_same_term_append_entries() {
+        let mut n = node(1, &[2, 3]);
+        n.election_timeout(); // term 1, voted for self
+        assert!(is_candidate(&n));
+        assert_eq!(n.persistent.voted_for, Some(NodeId::from(1)));
+
+        let req = AppendEntries {
+            term: Term::from(1), // same term — leader already elected
+            leader_id: NodeId::from(2),
+            prev_log_index: LogIndex::default(),
+            prev_log_term: Term::default(),
+            entries: vec![],
+            leader_commit: LogIndex::default(),
+        };
+        n.handle_append_entries(NodeId::from(2), req);
+
+        // must revert to follower but keep the vote (§5.2)
+        assert!(is_follower(&n));
+        assert_eq!(n.persistent.voted_for, Some(NodeId::from(1)));
     }
 
     #[test]
