@@ -7,19 +7,19 @@ use crate::storage::MemoryStorage;
 use crate::types::{Message, NodeId};
 
 /// A message in flight between nodes.
-struct InFlight<C> {
+struct InFlight<Cmd> {
     from: NodeId,
     to: NodeId,
-    message: Message<C>,
+    message: Message<Cmd>,
 }
 
 /// Simulated cluster for testing. Uses MemoryStorage on every node.
-pub struct Cluster<C, S> {
-    runtimes: Vec<Runtime<C, S, MemoryStorage<C>>>,
-    messages: VecDeque<InFlight<C>>,
+pub struct Cluster<Cmd, S> {
+    runtimes: Vec<Runtime<Cmd, S, MemoryStorage<Cmd>>>,
+    messages: VecDeque<InFlight<Cmd>>,
 }
 
-impl<C: Clone, S: StateMachine<C> + Default> Cluster<C, S> {
+impl<Cmd: Clone, S: StateMachine<Cmd> + Default> Cluster<Cmd, S> {
     /// Create a cluster with the given number of nodes.
     pub fn new(size: usize) -> Self {
         let ids: Vec<NodeId> = (1..=size).map(|i| NodeId::from(i as u64)).collect();
@@ -40,12 +40,12 @@ impl<C: Clone, S: StateMachine<C> + Default> Cluster<C, S> {
     }
 
     /// Get a reference to a node's runtime by index (0-based).
-    pub fn runtime(&self, index: usize) -> &Runtime<C, S, MemoryStorage<C>> {
+    pub fn runtime(&self, index: usize) -> &Runtime<Cmd, S, MemoryStorage<Cmd>> {
         &self.runtimes[index]
     }
 
     /// Get a mutable reference to a node's runtime by index (0-based).
-    pub fn runtime_mut(&mut self, index: usize) -> &mut Runtime<C, S, MemoryStorage<C>> {
+    pub fn runtime_mut(&mut self, index: usize) -> &mut Runtime<Cmd, S, MemoryStorage<Cmd>> {
         &mut self.runtimes[index]
     }
 
@@ -83,7 +83,7 @@ impl<C: Clone, S: StateMachine<C> + Default> Cluster<C, S> {
     }
 
     /// Deliver a single message and queue any responses.
-    fn deliver(&mut self, inflight: InFlight<C>) {
+    fn deliver(&mut self, inflight: InFlight<Cmd>) {
         let to_index = self.node_index(inflight.to);
         if let Some(index) = to_index {
             let commands = self.runtimes[index]
@@ -97,7 +97,7 @@ impl<C: Clone, S: StateMachine<C> + Default> Cluster<C, S> {
     }
 
     /// Queue outgoing commands from a node.
-    fn queue_commands(&mut self, from_index: usize, commands: Vec<Command<C>>) {
+    fn queue_commands(&mut self, from_index: usize, commands: Vec<Command<Cmd>>) {
         let from_id = self.runtimes[from_index].node().id;
         for command in commands {
             if let Command::Send { to, message } = command {

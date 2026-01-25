@@ -4,7 +4,7 @@ use crate::types::{LogEntry, LogIndex, NodeId, Term};
 /// servers): currentTerm, votedFor, and log must be stored on stable storage and survive
 /// crashes. Implementations must flush to durable media before returning from any mutating
 /// method — responding to an RPC before persisting violates Raft's safety guarantees.
-pub trait Storage<C> {
+pub trait Storage<Cmd> {
     type Error;
 
     /// Get the current term.
@@ -26,13 +26,13 @@ pub trait Storage<C> {
     fn term_at(&self, index: LogIndex) -> Result<Option<Term>, Self::Error>;
 
     /// Get a log entry by index.
-    fn entry(&self, index: LogIndex) -> Result<Option<LogEntry<C>>, Self::Error>;
+    fn entry(&self, index: LogIndex) -> Result<Option<LogEntry<Cmd>>, Self::Error>;
 
     /// Get log entries starting from an index.
-    fn entries_from(&self, start: LogIndex) -> Result<Vec<LogEntry<C>>, Self::Error>;
+    fn entries_from(&self, start: LogIndex) -> Result<Vec<LogEntry<Cmd>>, Self::Error>;
 
     /// Append an entry to the log. Returns the index of the new entry.
-    fn append(&mut self, entry: LogEntry<C>) -> Result<LogIndex, Self::Error>;
+    fn append(&mut self, entry: LogEntry<Cmd>) -> Result<LogIndex, Self::Error>;
 
     /// Truncate the log from the given index (inclusive).
     fn truncate_from(&mut self, index: LogIndex) -> Result<(), Self::Error>;
@@ -43,18 +43,18 @@ pub trait Storage<C> {
     fn append_entries(
         &mut self,
         prev_log_index: LogIndex,
-        entries: Vec<LogEntry<C>>,
+        entries: Vec<LogEntry<Cmd>>,
     ) -> Result<(), Self::Error>;
 }
 
 /// In-memory storage for testing.
-pub struct MemoryStorage<C> {
+pub struct MemoryStorage<Cmd> {
     current_term: Term,
     voted_for: Option<NodeId>,
-    log: Vec<LogEntry<C>>,
+    log: Vec<LogEntry<Cmd>>,
 }
 
-impl<C> MemoryStorage<C> {
+impl<Cmd> MemoryStorage<Cmd> {
     pub fn new() -> Self {
         Self {
             current_term: Term::default(),
@@ -64,13 +64,13 @@ impl<C> MemoryStorage<C> {
     }
 }
 
-impl<C> Default for MemoryStorage<C> {
+impl<Cmd> Default for MemoryStorage<Cmd> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<C: Clone> Storage<C> for MemoryStorage<C> {
+impl<Cmd: Clone> Storage<Cmd> for MemoryStorage<Cmd> {
     type Error = std::convert::Infallible;
 
     fn current_term(&self) -> Result<Term, Self::Error> {
@@ -102,21 +102,21 @@ impl<C: Clone> Storage<C> for MemoryStorage<C> {
         }
     }
 
-    fn entry(&self, index: LogIndex) -> Result<Option<LogEntry<C>>, Self::Error> {
+    fn entry(&self, index: LogIndex) -> Result<Option<LogEntry<Cmd>>, Self::Error> {
         match index.to_array_index() {
             None => Ok(None),
             Some(idx) => Ok(self.log.get(idx).cloned()),
         }
     }
 
-    fn entries_from(&self, start: LogIndex) -> Result<Vec<LogEntry<C>>, Self::Error> {
+    fn entries_from(&self, start: LogIndex) -> Result<Vec<LogEntry<Cmd>>, Self::Error> {
         match start.to_array_index() {
             None => Ok(self.log.clone()),
             Some(idx) => Ok(self.log.get(idx..).unwrap_or_default().to_vec()),
         }
     }
 
-    fn append(&mut self, entry: LogEntry<C>) -> Result<LogIndex, Self::Error> {
+    fn append(&mut self, entry: LogEntry<Cmd>) -> Result<LogIndex, Self::Error> {
         self.log.push(entry);
         Ok(LogIndex::from_length(self.log.len()))
     }
@@ -131,7 +131,7 @@ impl<C: Clone> Storage<C> for MemoryStorage<C> {
     fn append_entries(
         &mut self,
         prev_log_index: LogIndex,
-        entries: Vec<LogEntry<C>>,
+        entries: Vec<LogEntry<Cmd>>,
     ) -> Result<(), Self::Error> {
         let mut insert_index = prev_log_index.next();
 

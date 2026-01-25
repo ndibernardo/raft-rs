@@ -2,7 +2,7 @@ use super::primitives::Term;
 
 /// A single entry in the replicated log.
 #[derive(Clone)]
-pub struct LogEntry<C> {
+pub struct LogEntry<Cmd> {
     pub term: Term,
-    pub command: C,
+    pub command: Cmd,
 }

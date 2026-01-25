@@ -8,16 +8,16 @@ use crate::storage::Storage;
 use crate::types::{LogIndex, Message, NodeId};
 
 /// Trait for state machines that can apply commands.
-pub trait StateMachine<C> {
+pub trait StateMachine<Cmd> {
     type Output;
-    fn apply(&mut self, command: C) -> Self::Output;
+    fn apply(&mut self, command: Cmd) -> Self::Output;
 }
 
 /// Events that drive the runtime.
-pub enum Event<C> {
+pub enum Event<Cmd> {
     ElectionTimeout,
     HeartbeatTimeout,
-    Message { from: NodeId, message: Message<C> },
+    Message { from: NodeId, message: Message<Cmd> },
 }
 
 /// Timer configuration.
@@ -36,8 +36,8 @@ impl Default for TimerConfig {
 }
 
 /// Runtime that wraps a Raft node with timer management and durable storage.
-pub struct Runtime<C, S, St> {
-    node: Node<C>,
+pub struct Runtime<Cmd, S, St> {
+    node: Node<Cmd>,
     state_machine: S,
     storage: St,
     config: TimerConfig,
@@ -45,8 +45,8 @@ pub struct Runtime<C, S, St> {
     heartbeat_deadline: Instant,
 }
 
-impl<C: Clone, S: StateMachine<C>, St: Storage<C>> Runtime<C, S, St> {
-    pub fn new(node: Node<C>, state_machine: S, storage: St, config: TimerConfig) -> Self {
+impl<Cmd: Clone, S: StateMachine<Cmd>, St: Storage<Cmd>> Runtime<Cmd, S, St> {
+    pub fn new(node: Node<Cmd>, state_machine: S, storage: St, config: TimerConfig) -> Self {
         let now = Instant::now();
         Self {
             node,
@@ -58,7 +58,7 @@ impl<C: Clone, S: StateMachine<C>, St: Storage<C>> Runtime<C, S, St> {
         }
     }
 
-    pub fn node(&self) -> &Node<C> {
+    pub fn node(&self) -> &Node<Cmd> {
         &self.node
     }
 
@@ -73,7 +73,7 @@ impl<C: Clone, S: StateMachine<C>, St: Storage<C>> Runtime<C, S, St> {
     /// Process an event, persist state, apply committed entries, and return outbound commands.
     /// Persistent state is saved before returning — callers must not send responses until
     /// this method returns successfully, matching the durability requirement of §5.1.
-    pub fn handle(&mut self, event: Event<C>) -> Result<Vec<Command<C>>, St::Error> {
+    pub fn handle(&mut self, event: Event<Cmd>) -> Result<Vec<Command<Cmd>>, St::Error> {
         let commands = match event {
             Event::ElectionTimeout => self.node.election_timeout(),
             Event::HeartbeatTimeout => self.node.heartbeat_timeout(),
@@ -90,7 +90,7 @@ impl<C: Clone, S: StateMachine<C>, St: Storage<C>> Runtime<C, S, St> {
     /// §5.2: if election timeout elapses without receiving AppendEntries or granting a vote,
     /// the server starts an election. Leaders suppress elections by sending heartbeats
     /// within each interval. Timeouts should be randomized in [T, 2T] to avoid split votes.
-    pub fn poll_timers(&self) -> Option<Event<C>> {
+    pub fn poll_timers(&self) -> Option<Event<Cmd>> {
         let now = Instant::now();
 
         if now >= self.election_deadline {
@@ -114,11 +114,11 @@ impl<C: Clone, S: StateMachine<C>, St: Storage<C>> Runtime<C, S, St> {
     }
 
     /// Submit a client command. Returns log index if leader, None otherwise.
-    pub fn submit(&mut self, command: C) -> Option<LogIndex> {
+    pub fn submit(&mut self, command: Cmd) -> Option<LogIndex> {
         self.node.submit_command(command)
     }
 
-    fn handle_message(&mut self, from: NodeId, message: Message<C>) -> Vec<Command<C>> {
+    fn handle_message(&mut self, from: NodeId, message: Message<Cmd>) -> Vec<Command<Cmd>> {
         match message {
             Message::RequestVote(req) => self.node.handle_request_vote(from, req),
             Message::RequestVoteResponse(resp) => self.node.handle_request_vote_response(from, resp),
@@ -129,7 +129,7 @@ impl<C: Clone, S: StateMachine<C>, St: Storage<C>> Runtime<C, S, St> {
         }
     }
 
-    fn process_commands(&mut self, commands: &[Command<C>]) {
+    fn process_commands(&mut self, commands: &[Command<Cmd>]) {
         for command in commands {
             match command {
                 Command::ResetElectionTimer => {

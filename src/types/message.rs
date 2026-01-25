@@ -17,12 +17,12 @@ pub struct RequestVoteResponse {
 }
 
 /// AppendEntries RPC arguments.
-pub struct AppendEntries<C> {
+pub struct AppendEntries<Cmd> {
     pub term: Term,
     pub leader_id: NodeId,
     pub prev_log_index: LogIndex,
     pub prev_log_term: Term,
-    pub entries: Vec<LogEntry<C>>,
+    pub entries: Vec<LogEntry<Cmd>>,
     pub leader_commit: LogIndex,
 }
 
@@ -34,9 +34,9 @@ pub struct AppendEntriesResponse {
 }
 
 /// All possible Raft messages.
-pub enum Message<C> {
+pub enum Message<Cmd> {
     RequestVote(RequestVote),
     RequestVoteResponse(RequestVoteResponse),
-    AppendEntries(AppendEntries<C>),
+    AppendEntries(AppendEntries<Cmd>),
     AppendEntriesResponse(AppendEntriesResponse),
 }
