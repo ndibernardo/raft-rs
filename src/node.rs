@@ -258,7 +258,13 @@ impl<Cmd: Clone> Node<Cmd> {
 
     /// §5.2: upon winning the election, send initial empty AppendEntries (heartbeats) to
     /// each server. Figure 2, Rules for Servers (Leaders): initialize nextIndex and matchIndex.
+    /// §8: append a no-op entry so that entries from previous terms are committed indirectly
+    /// once the no-op reaches majority, avoiding the Figure 8 anomaly.
     fn become_leader(&mut self) -> Vec<Command<Cmd>> {
+        self.persistent.log.push(LogEntry {
+            term: self.persistent.current_term,
+            command: None,
+        });
         self.role = Role::Leader(Leader::new(&self.peers, self.last_log_index()));
         self.send_heartbeats()
     }
@@ -446,7 +452,7 @@ impl<Cmd: Clone> Node<Cmd> {
 
         let entry = LogEntry {
             term: self.persistent.current_term,
-            command,
+            command: Some(command),
         };
         self.persistent.log.push(entry);
 
@@ -491,22 +497,28 @@ impl<Cmd: Clone> Node<Cmd> {
 
     /// Figure 2, Rules for Servers (All Servers): if commitIndex > lastApplied, increment
     /// lastApplied and apply log[lastApplied] to the state machine. §5.3.
+    /// No-op entries (command = None) advance lastApplied but are not returned to the caller.
     pub fn take_entry_to_apply(&mut self) -> Option<Applied<'_, Cmd>> {
-        if self.volatile.last_applied >= self.volatile.commit_index {
-            return None;
+        loop {
+            if self.volatile.last_applied >= self.volatile.commit_index {
+                return None;
+            }
+
+            self.volatile.last_applied = self.volatile.last_applied.next();
+            let index = self.volatile.last_applied;
+
+            let Some(idx) = index.to_array_index() else {
+                return None;
+            };
+            let Some(entry) = self.persistent.log.get(idx) else {
+                return None;
+            };
+
+            if let Some(command) = &entry.command {
+                return Some(Applied { index, command });
+            }
+            // no-op entry — advance last_applied and keep looping
         }
-
-        self.volatile.last_applied = self.volatile.last_applied.next();
-        let index = self.volatile.last_applied;
-
-        self.volatile
-            .last_applied
-            .to_array_index()
-            .and_then(|idx| self.persistent.log.get(idx))
-            .map(|entry| Applied {
-                index,
-                command: &entry.command,
-            })
     }
 
     /// §5.3, Figure 2, AppendEntries RPC §3–5: if an existing entry conflicts with a new one
@@ -674,7 +686,7 @@ mod tests {
         let mut n = node(1, &[2, 3]);
         n.persistent.log.push(LogEntry {
             term: Term::from(2),
-            command: "x".to_string(),
+            command: Some("x".to_string()),
         });
 
         let req = RequestVote {
@@ -735,11 +747,11 @@ mod tests {
             entries: vec![
                 LogEntry {
                     term: Term::from(1),
-                    command: "a".to_string(),
+                    command: Some("a".to_string()),
                 },
                 LogEntry {
                     term: Term::from(1),
-                    command: "b".to_string(),
+                    command: Some("b".to_string()),
                 },
             ],
             leader_commit: LogIndex::default(),
@@ -754,11 +766,11 @@ mod tests {
         let mut n = node(1, &[2, 3]);
         n.persistent.log.push(LogEntry {
             term: Term::from(1),
-            command: "old".to_string(),
+            command: Some("old".to_string()),
         });
         n.persistent.log.push(LogEntry {
             term: Term::from(1),
-            command: "conflict".to_string(),
+            command: Some("conflict".to_string()),
         });
 
         let req = AppendEntries {
@@ -768,14 +780,14 @@ mod tests {
             prev_log_term: Term::from(1),
             entries: vec![LogEntry {
                 term: Term::from(2),
-                command: "new".to_string(),
+                command: Some("new".to_string()),
             }],
             leader_commit: LogIndex::default(),
         };
         n.handle_append_entries(NodeId::from(2), req);
 
         assert_eq!(n.persistent.log.len(), 2);
-        assert_eq!(n.persistent.log[1].command, "new");
+        assert_eq!(n.persistent.log[1].command, Some("new".to_string()));
         assert_eq!(n.persistent.log[1].term, Term::from(2));
     }
 
@@ -812,11 +824,11 @@ mod tests {
         );
         assert!(is_leader(&n));
 
-        // Submit a command.
+        // Submit a command (no-op is at index 1, command at index 2).
         let index = n.submit_command("cmd".to_string());
-        assert_eq!(index, Some(LogIndex::from(1)));
+        assert_eq!(index, Some(LogIndex::from(2)));
 
-        // Simulate successful replication to one follower.
+        // Simulate successful replication of no-op to one follower.
         n.handle_append_entries_response(
             NodeId::from(2),
             AppendEntriesResponse {
@@ -826,7 +838,7 @@ mod tests {
             },
         );
 
-        // With 3-node cluster, leader + 1 follower = majority.
+        // No-op at index 1 (current term) achieves majority → commit_index advances.
         assert_eq!(n.volatile.commit_index, LogIndex::from(1));
     }
 
@@ -881,33 +893,33 @@ mod tests {
 
     #[test]
     fn leader_does_not_commit_entries_from_previous_term() {
+        use crate::state::Leader as LeaderState;
+
+        // Build a leader in term 2 that has an old entry at index 1 (term 1) but no
+        // current-term entry yet.  This replicates the Figure 8 scenario: the leader
+        // must not advance commitIndex to an entry whose term < currentTerm even when
+        // it has majority replication — only a current-term entry may trigger the commit.
         let mut n = node(1, &[2, 3]);
-        n.election_timeout();
-        n.handle_request_vote_response(
-            NodeId::from(2),
-            RequestVoteResponse {
-                term: Term::from(1),
-                vote_granted: true,
-            },
-        );
-
-        // Manually add an entry from a previous term (simulating log from old leader).
+        n.persistent.current_term = Term::from(2);
+        n.persistent.voted_for = Some(NodeId::from(1));
         n.persistent.log.push(LogEntry {
-            term: Term::from(0),
-            command: "old".to_string(),
+            term: Term::from(1),
+            command: Some("old".to_string()),
         });
+        // Set up leader state with next_index starting after the existing entry.
+        n.role = Role::Leader(LeaderState::new(&n.peers, LogIndex::from(1)));
 
-        // Simulate successful replication.
+        // Peer 2 reports it has replicated the old entry.
         n.handle_append_entries_response(
             NodeId::from(2),
             AppendEntriesResponse {
-                term: Term::from(1),
+                term: Term::from(2),
                 success: true,
                 match_index: LogIndex::from(1),
             },
         );
 
-        // Should not commit because entry is from term 0, not current term 1.
+        // Must not commit: entry at index 1 is from term 1, not currentTerm 2.
         assert_eq!(n.volatile.commit_index, LogIndex::default());
     }
 
@@ -918,11 +930,11 @@ mod tests {
         // Add entries to log.
         n.persistent.log.push(LogEntry {
             term: Term::from(1),
-            command: "a".to_string(),
+            command: Some("a".to_string()),
         });
         n.persistent.log.push(LogEntry {
             term: Term::from(1),
-            command: "b".to_string(),
+            command: Some("b".to_string()),
         });
 
         // Commit first entry.
@@ -951,13 +963,54 @@ mod tests {
 
         n.persistent.log.push(LogEntry {
             term: Term::from(1),
-            command: "cmd".to_string(),
+            command: Some("cmd".to_string()),
         });
         n.volatile.commit_index = LogIndex::from(1);
 
         assert_eq!(n.volatile.last_applied, LogIndex::default());
         n.take_entry_to_apply();
         assert_eq!(n.volatile.last_applied, LogIndex::from(1));
+    }
+
+    #[test]
+    fn become_leader_appends_noop_entry() {
+        let mut n = node(1, &[2, 3]);
+        n.election_timeout();
+        n.handle_request_vote_response(
+            NodeId::from(2),
+            RequestVoteResponse {
+                term: Term::from(1),
+                vote_granted: true,
+            },
+        );
+
+        assert!(is_leader(&n));
+        assert_eq!(n.persistent.log.len(), 1);
+        assert!(n.persistent.log[0].command.is_none());
+        assert_eq!(n.persistent.log[0].term, Term::from(1));
+    }
+
+    #[test]
+    fn take_entry_to_apply_skips_noop() {
+        let mut n = node(1, &[2, 3]);
+
+        // no-op at index 1, real command at index 2.
+        n.persistent.log.push(LogEntry {
+            term: Term::from(1),
+            command: None,
+        });
+        n.persistent.log.push(LogEntry {
+            term: Term::from(1),
+            command: Some("cmd".to_string()),
+        });
+        n.volatile.commit_index = LogIndex::from(2);
+
+        // First call must skip the no-op and return the real command.
+        let applied = n.take_entry_to_apply().unwrap();
+        assert_eq!(applied.index, LogIndex::from(2));
+        assert_eq!(applied.command, &"cmd".to_string());
+        assert_eq!(n.volatile.last_applied, LogIndex::from(2));
+        assert!(n.take_entry_to_apply().is_none());
     }
 
     #[test]

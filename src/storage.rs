@@ -178,7 +178,7 @@ mod tests {
         let idx = storage
             .append(LogEntry {
                 term: Term::from(1),
-                command: "a".to_string(),
+                command: Some("a".to_string()),
             })
             .unwrap();
         assert_eq!(idx, LogIndex::from(1));
@@ -186,7 +186,7 @@ mod tests {
         let idx = storage
             .append(LogEntry {
                 term: Term::from(1),
-                command: "b".to_string(),
+                command: Some("b".to_string()),
             })
             .unwrap();
         assert_eq!(idx, LogIndex::from(2));
@@ -195,7 +195,7 @@ mod tests {
         assert_eq!(storage.term_at(LogIndex::from(1)).unwrap(), Some(Term::from(1)));
         assert_eq!(
             storage.entry(LogIndex::from(1)).unwrap().map(|e| e.command),
-            Some("a".to_string())
+            Some(Some("a".to_string()))
         );
     }
 
@@ -206,19 +206,19 @@ mod tests {
         storage
             .append(LogEntry {
                 term: Term::from(1),
-                command: "a".to_string(),
+                command: Some("a".to_string()),
             })
             .unwrap();
         storage
             .append(LogEntry {
                 term: Term::from(1),
-                command: "b".to_string(),
+                command: Some("b".to_string()),
             })
             .unwrap();
         storage
             .append(LogEntry {
                 term: Term::from(1),
-                command: "c".to_string(),
+                command: Some("c".to_string()),
             })
             .unwrap();
 
@@ -234,13 +234,13 @@ mod tests {
         storage
             .append(LogEntry {
                 term: Term::from(1),
-                command: "a".to_string(),
+                command: Some("a".to_string()),
             })
             .unwrap();
         storage
             .append(LogEntry {
                 term: Term::from(1),
-                command: "old".to_string(),
+                command: Some("old".to_string()),
             })
             .unwrap();
 
@@ -249,7 +249,7 @@ mod tests {
                 LogIndex::from(1),
                 vec![LogEntry {
                     term: Term::from(2),
-                    command: "new".to_string(),
+                    command: Some("new".to_string()),
                 }],
             )
             .unwrap();
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(storage.last_log_index().unwrap(), LogIndex::from(2));
         assert_eq!(
             storage.entry(LogIndex::from(2)).unwrap().map(|e| e.command),
-            Some("new".to_string())
+            Some(Some("new".to_string()))
         );
     }
 }

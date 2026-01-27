@@ -206,13 +206,13 @@ mod tests {
         });
         assert!(index.is_some());
 
-        // Simulate replication success.
+        // Simulate replication success (no-op at index 1, command at index 2).
         rt.handle(Event::Message {
             from: NodeId::from(2),
             message: Message::AppendEntriesResponse(AppendEntriesResponse {
                 term: Term::from(1),
                 success: true,
-                match_index: LogIndex::from(1),
+                match_index: LogIndex::from(2),
             }),
         })
         .unwrap();

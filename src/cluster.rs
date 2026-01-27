@@ -304,26 +304,26 @@ mod tests {
         cluster.deliver_all();
         assert_eq!(cluster.leader(), Some(0));
 
-        // Submit command to leader.
+        // Submit command to leader (no-op is at index 1, command at index 2).
         let index = cluster.runtime_mut(0).submit(KvCommand::Set {
             key: "x".to_string(),
             value: "1".to_string(),
         });
-        assert_eq!(index, Some(LogIndex::from(1)));
+        assert_eq!(index, Some(LogIndex::from(2)));
 
-        // Send heartbeats with new entry.
+        // Send heartbeats with new entries (no-op + command).
         cluster.heartbeat_timeout(0);
         cluster.deliver_all();
 
-        // Verify all nodes have the entry.
+        // Verify all nodes have both entries (no-op + command).
         for i in 0..3 {
-            assert_eq!(cluster.runtime(i).node().persistent.log.len(), 1);
+            assert_eq!(cluster.runtime(i).node().persistent.log.len(), 2);
         }
 
-        // Verify leader committed and applied.
+        // Verify leader committed and applied both entries.
         assert_eq!(
             cluster.runtime(0).node().volatile.commit_index,
-            LogIndex::from(1)
+            LogIndex::from(2)
         );
 
         // Verify state machine applied on leader.
@@ -354,11 +354,11 @@ mod tests {
         cluster.heartbeat_timeout(0);
         cluster.deliver_all();
 
-        // Verify followers committed.
+        // Verify followers committed (no-op at 1 + command at 2).
         for i in 1..3 {
             assert_eq!(
                 cluster.runtime(i).node().volatile.commit_index,
-                LogIndex::from(1)
+                LogIndex::from(2)
             );
         }
     }
