@@ -36,13 +36,16 @@ impl Default for TimerConfig {
 }
 
 /// Runtime that wraps a Raft node with timer management and durable storage.
-pub struct Runtime<Cmd, S, St> {
+pub struct Runtime<Cmd, S: StateMachine<Cmd>, St> {
     node: Node<Cmd>,
     state_machine: S,
     storage: St,
     config: TimerConfig,
     election_deadline: Instant,
     heartbeat_deadline: Instant,
+    /// Outputs produced by applying committed entries, in log order.
+    /// Drained by the caller via take_outputs after each handle() call.
+    pending_outputs: Vec<(LogIndex, S::Output)>,
 }
 
 impl<Cmd: Clone, S: StateMachine<Cmd>, St: Storage<Cmd>> Runtime<Cmd, S, St> {
@@ -55,6 +58,7 @@ impl<Cmd: Clone, S: StateMachine<Cmd>, St: Storage<Cmd>> Runtime<Cmd, S, St> {
             election_deadline: now + config.election_timeout,
             heartbeat_deadline: now + config.heartbeat_interval,
             config,
+            pending_outputs: Vec::new(),
         }
     }
 
@@ -149,11 +153,18 @@ impl<Cmd: Clone, S: StateMachine<Cmd>, St: Storage<Cmd>> Runtime<Cmd, S, St> {
         }
     }
 
+    /// Drain all state machine outputs accumulated since the last call.
+    /// Each entry is (log_index, output) in application order.
+    pub fn take_outputs(&mut self) -> Vec<(LogIndex, S::Output)> {
+        std::mem::take(&mut self.pending_outputs)
+    }
+
     // Figure 2, Rules for Servers (All Servers): if commitIndex > lastApplied, apply the
     // next entry to the state machine. §5.3: state machines process entries in log order.
     fn apply_committed(&mut self) {
         while let Some(applied) = self.node.take_entry_to_apply() {
-            self.state_machine.apply(applied.command.clone());
+            let output = self.state_machine.apply(applied.command.clone());
+            self.pending_outputs.push((applied.index, output));
         }
     }
 }
@@ -222,6 +233,46 @@ mod tests {
             key: "foo".to_string(),
         });
         assert_eq!(result, KvResult::Value(Some("bar".to_string())));
+    }
+
+    #[test]
+    fn take_outputs_returns_applied_results() {
+        let mut rt = runtime(1, &[2, 3]);
+
+        // Become leader.
+        rt.handle(Event::ElectionTimeout).unwrap();
+        rt.handle(Event::Message {
+            from: NodeId::from(2),
+            message: Message::RequestVoteResponse(RequestVoteResponse {
+                term: Term::from(1),
+                vote_granted: true,
+            }),
+        })
+        .unwrap();
+
+        // Submit a command and replicate it (no-op at 1, command at 2).
+        rt.submit(KvCommand::Set {
+            key: "k".to_string(),
+            value: "v".to_string(),
+        });
+        rt.handle(Event::Message {
+            from: NodeId::from(2),
+            message: Message::AppendEntriesResponse(AppendEntriesResponse {
+                term: Term::from(1),
+                success: true,
+                match_index: LogIndex::from(2),
+            }),
+        })
+        .unwrap();
+
+        // take_outputs should return exactly the Set result at index 2.
+        let outputs = rt.take_outputs();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].0, LogIndex::from(2));
+        assert_eq!(outputs[0].1, KvResult::Ok);
+
+        // Subsequent call returns nothing until new commits arrive.
+        assert!(rt.take_outputs().is_empty());
     }
 
     #[test]

@@ -14,7 +14,7 @@ struct InFlight<Cmd> {
 }
 
 /// Simulated cluster for testing. Uses MemoryStorage on every node.
-pub struct Cluster<Cmd, S> {
+pub struct Cluster<Cmd, S: StateMachine<Cmd>> {
     runtimes: Vec<Runtime<Cmd, S, MemoryStorage<Cmd>>>,
     messages: VecDeque<InFlight<Cmd>>,
 }
