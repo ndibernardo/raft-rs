@@ -62,6 +62,21 @@ impl<Cmd: Clone, S: StateMachine<Cmd>, St: Storage<Cmd>> Runtime<Cmd, S, St> {
         }
     }
 
+    /// Reconstruct a Runtime after a crash by loading persistent state from storage.
+    /// The node restarts as a follower (§5.1). The caller is responsible for supplying
+    /// a fresh state machine; replaying committed entries is the server's responsibility
+    /// once the new leader drives AppendEntries with the correct commit index.
+    pub fn from_storage(
+        id: NodeId,
+        peers: Vec<NodeId>,
+        state_machine: S,
+        storage: St,
+        config: TimerConfig,
+    ) -> Result<Self, St::Error> {
+        let node = Node::from_storage(id, peers, &storage)?;
+        Ok(Self::new(node, state_machine, storage, config))
+    }
+
     pub fn node(&self) -> &Node<Cmd> {
         &self.node
     }
@@ -273,6 +288,41 @@ mod tests {
 
         // Subsequent call returns nothing until new commits arrive.
         assert!(rt.take_outputs().is_empty());
+    }
+
+    #[test]
+    fn from_storage_restores_persistent_state() {
+        let mut rt = runtime(1, &[2, 3]);
+
+        // Become leader — handle() persists the no-op to storage on each call.
+        rt.handle(Event::ElectionTimeout).unwrap();
+        rt.handle(Event::Message {
+            from: NodeId::from(2),
+            message: Message::RequestVoteResponse(RequestVoteResponse {
+                term: Term::from(1),
+                vote_granted: true,
+            }),
+        })
+        .unwrap();
+
+        // At this point storage holds: term=1, voted_for=1, log=[no-op@1].
+        let expected_term = rt.node().persistent.current_term;
+        let expected_log_len = rt.node().persistent.log.len();
+
+        let storage = rt.storage;
+        let restored = Runtime::from_storage(
+            NodeId::from(1),
+            vec![NodeId::from(2), NodeId::from(3)],
+            KvStore::new(),
+            storage,
+            TimerConfig::default(),
+        )
+        .unwrap();
+
+        // Term and log are recovered from durable storage; node restarts as follower.
+        assert_eq!(restored.node().persistent.current_term, expected_term);
+        assert_eq!(restored.node().persistent.log.len(), expected_log_len);
+        assert!(matches!(restored.node().role, Role::Follower(_)));
     }
 
     #[test]
