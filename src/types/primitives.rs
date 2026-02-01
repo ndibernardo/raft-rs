@@ -1,9 +1,12 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// Monotonically increasing term number.
 ///
 /// Terms act as logical clocks in Raft and are used to detect stale information.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Term {
     value: u64,
 }
@@ -32,7 +35,8 @@ impl From<u64> for Term {
 ///
 /// LogIndex 0 represents "no entries" or "before the first entry".
 /// Valid log entries start at index 1.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct LogIndex {
     value: u64,
 }
@@ -82,7 +86,8 @@ impl From<u64> for LogIndex {
 }
 
 /// Unique server identifier.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct NodeId {
     value: u64,
 }

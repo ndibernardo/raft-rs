@@ -1,5 +1,6 @@
 pub mod cluster;
 pub mod command;
+pub mod file_storage;
 pub mod kv;
 pub mod node;
 pub mod runtime;
