@@ -86,7 +86,7 @@ impl From<u64> for LogIndex {
 }
 
 /// Unique server identifier.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NodeId {
     value: u64,

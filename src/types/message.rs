@@ -1,8 +1,10 @@
+use serde::{Deserialize, Serialize};
+
 use super::log::LogEntry;
 use super::primitives::{LogIndex, NodeId, Term};
 
 /// RequestVote RPC arguments.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RequestVote {
     pub term: Term,
     pub candidate_id: NodeId,
@@ -11,12 +13,14 @@ pub struct RequestVote {
 }
 
 /// RequestVote RPC response.
+#[derive(Serialize, Deserialize)]
 pub struct RequestVoteResponse {
     pub term: Term,
     pub vote_granted: bool,
 }
 
 /// AppendEntries RPC arguments.
+#[derive(Serialize, Deserialize)]
 pub struct AppendEntries<Cmd> {
     pub term: Term,
     pub leader_id: NodeId,
@@ -27,6 +31,7 @@ pub struct AppendEntries<Cmd> {
 }
 
 /// AppendEntries RPC response.
+#[derive(Serialize, Deserialize)]
 pub struct AppendEntriesResponse {
     pub term: Term,
     pub success: bool,
@@ -34,6 +39,7 @@ pub struct AppendEntriesResponse {
 }
 
 /// All possible Raft messages.
+#[derive(Serialize, Deserialize)]
 pub enum Message<Cmd> {
     RequestVote(RequestVote),
     RequestVoteResponse(RequestVoteResponse),
