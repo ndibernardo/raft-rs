@@ -4,6 +4,7 @@ pub mod file_storage;
 pub mod kv;
 pub mod node;
 pub mod runtime;
+pub mod server;
 pub mod state;
 pub mod storage;
 pub mod transport;
