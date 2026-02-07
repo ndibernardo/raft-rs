@@ -1,3 +1,4 @@
+pub mod client_api;
 pub mod cluster;
 pub mod command;
 pub mod file_storage;
