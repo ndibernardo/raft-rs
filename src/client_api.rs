@@ -32,9 +32,9 @@ pub fn start(addr: SocketAddr, tx: mpsc::Sender<Pending>) {
 
 async fn serve(addr: SocketAddr, tx: mpsc::Sender<Pending>) {
     let app = Router::new()
-        .route("/kv/:key", get(handle_get))
-        .route("/kv/:key", put(handle_put))
-        .route("/kv/:key", delete(handle_delete))
+        .route("/kv/{key}", get(handle_get))
+        .route("/kv/{key}", put(handle_put))
+        .route("/kv/{key}", delete(handle_delete))
         .with_state(tx);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
