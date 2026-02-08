@@ -1,3 +1,5 @@
+use tracing::{debug, info};
+
 use crate::command::Command;
 use crate::state::{Candidate, Follower, Leader};
 use crate::storage::Storage;
@@ -135,6 +137,9 @@ impl<Cmd: Clone> Node<Cmd> {
         let mut follower = Follower::new();
         if let Some(id) = leader_id {
             follower.set_leader(id);
+            info!(node = %self.id, term = %self.persistent.current_term, leader = %id, "became follower");
+        } else {
+            info!(node = %self.id, term = %self.persistent.current_term, "stepped down to follower");
         }
         self.role = Role::Follower(follower);
     }
@@ -160,6 +165,7 @@ impl<Cmd: Clone> Node<Cmd> {
         self.persistent.current_term = self.persistent.current_term.increment();
         self.persistent.voted_for = Some(self.id);
         self.role = Role::Candidate(Candidate::new(self.id));
+        info!(node = %self.id, term = %self.persistent.current_term, "election started");
 
         // Single node cluster: already have majority with own vote.
         let cluster_size = self.peers.len() + 1;
@@ -274,6 +280,7 @@ impl<Cmd: Clone> Node<Cmd> {
             command: None,
         });
         self.role = Role::Leader(Leader::new(&self.peers, self.last_log_index()));
+        info!(node = %self.id, term = %self.persistent.current_term, "became leader");
         self.send_heartbeats()
     }
 
@@ -495,6 +502,7 @@ impl<Cmd: Clone> Node<Cmd> {
 
         if has_higher_index && is_current_term {
             self.volatile.commit_index = majority_index;
+            debug!(node = %self.id, commit_index = %majority_index, "commit index advanced");
         }
     }
 

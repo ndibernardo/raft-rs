@@ -65,7 +65,7 @@ impl Server {
 
         let transport = Transport::bind(local_id, addr, peers)?;
 
-        eprintln!("raft: node {local_id} listening on {addr}");
+        tracing::info!(node = %local_id, addr = %addr, "raft listener bound");
 
         Ok(Self {
             runtime,
@@ -79,7 +79,7 @@ impl Server {
     pub fn run(&mut self) -> Result<(), ServerError> {
         loop {
             // Accept any client API requests that arrived since the last iteration.
-            self.drain_client_requests();
+            self.poll_client_requests();
 
             // Drain fired timers before blocking — back-to-back timeouts must not be skipped.
             if let Some(event) = self.runtime.poll_timers() {
@@ -104,12 +104,13 @@ impl Server {
         }
     }
 
-    /// Pull pending client requests off the channel and submit them to the runtime.
-    fn drain_client_requests(&mut self) {
+    /// Check for pending client requests and submit them to the runtime.
+    fn poll_client_requests(&mut self) {
         loop {
             match self.client_rx.try_recv() {
                 Ok((command, resp_tx)) => match self.runtime.submit(command) {
                     Some(index) => {
+                        tracing::debug!(node = %self.runtime.node().id, %index, "client command queued");
                         self.pending.insert(index, resp_tx);
                     }
                     None => {

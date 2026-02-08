@@ -45,7 +45,7 @@ async fn serve(addr: SocketAddr, tx: mpsc::Sender<Pending>) {
         }
     };
 
-    eprintln!("raft: client api listening on {addr}");
+    tracing::info!(%addr, "client api listening");
 
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("client api: server error: {e}");

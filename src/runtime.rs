@@ -180,7 +180,9 @@ impl<Cmd: Clone, S: StateMachine<Cmd>, St: Storage<Cmd>> Runtime<Cmd, S, St> {
     // Figure 2, Rules for Servers (All Servers): if commitIndex > lastApplied, apply the
     // next entry to the state machine. §5.3: state machines process entries in log order.
     fn apply_committed(&mut self) {
+        let node_id = self.node.id;
         while let Some(applied) = self.node.take_entry_to_apply() {
+            tracing::debug!(node = %node_id, index = %applied.index, "entry applied");
             let output = self.state_machine.apply(applied.command.clone());
             self.pending_outputs.push((applied.index, output));
         }
