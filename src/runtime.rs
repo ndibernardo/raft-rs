@@ -112,12 +112,15 @@ impl<Cmd: Clone, S: StateMachine<Cmd>, St: Storage<Cmd>> Runtime<Cmd, S, St> {
     pub fn poll_timers(&self) -> Option<Event<Cmd>> {
         let now = Instant::now();
 
-        if now >= self.election_deadline {
-            return Some(Event::ElectionTimeout);
+        if matches!(self.node.role, Role::Leader(_)) {
+            if now >= self.heartbeat_deadline {
+                return Some(Event::HeartbeatTimeout);
+            }
+            return None;
         }
 
-        if matches!(self.node.role, Role::Leader(_)) && now >= self.heartbeat_deadline {
-            return Some(Event::HeartbeatTimeout);
+        if now >= self.election_deadline {
+            return Some(Event::ElectionTimeout);
         }
 
         None
@@ -126,7 +129,7 @@ impl<Cmd: Clone, S: StateMachine<Cmd>, St: Storage<Cmd>> Runtime<Cmd, S, St> {
     /// Time until next timer fires.
     pub fn next_deadline(&self) -> Instant {
         if matches!(self.node.role, Role::Leader(_)) {
-            self.election_deadline.min(self.heartbeat_deadline)
+            self.heartbeat_deadline
         } else {
             self.election_deadline
         }

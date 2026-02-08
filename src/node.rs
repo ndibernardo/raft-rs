@@ -187,22 +187,30 @@ impl<Cmd: Clone> Node<Cmd> {
 
     /// Handle incoming RequestVote RPC. Figure 2, RequestVote RPC (receiver implementation).
     pub fn handle_request_vote(&mut self, from: NodeId, req: RequestVote) -> Vec<Command<Cmd>> {
+        let mut reset_timer = false;
         if req.term > self.persistent.current_term {
             self.become_follower(req.term, None);
+            reset_timer = true;
         }
 
         let vote_granted = self.should_grant_vote(&req);
         if vote_granted {
             self.persistent.voted_for = Some(req.candidate_id);
+            reset_timer = true;
         }
 
-        vec![Command::Send {
+        let mut commands = Vec::new();
+        if reset_timer {
+            commands.push(Command::ResetElectionTimer);
+        }
+        commands.push(Command::Send {
             to: from,
             message: Message::RequestVoteResponse(RequestVoteResponse {
                 term: self.persistent.current_term,
                 vote_granted,
             }),
-        }]
+        });
+        commands
     }
 
     /// Grant vote only if all three conditions hold. Figure 2, RequestVote RPC §1–2:
@@ -236,7 +244,7 @@ impl<Cmd: Clone> Node<Cmd> {
         }
         if resp.term > self.persistent.current_term {
             self.become_follower(resp.term, None);
-            return Vec::new();
+            return vec![Command::ResetElectionTimer];
         }
 
         let dominated = match &mut self.role {
@@ -421,7 +429,7 @@ impl<Cmd: Clone> Node<Cmd> {
     ) -> Vec<Command<Cmd>> {
         if resp.term > self.persistent.current_term {
             self.become_follower(resp.term, None);
-            return Vec::new();
+            return vec![Command::ResetElectionTimer];
         }
         if resp.term < self.persistent.current_term {
             return Vec::new();
