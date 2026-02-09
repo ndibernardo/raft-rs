@@ -3,6 +3,11 @@
 # Usage: ./scripts/test-cluster.sh
 set -euo pipefail
 
+# Find project root (directory containing Cargo.toml)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
+
 BINARY="./target/release/raft"
 PASS=0
 FAIL=0
